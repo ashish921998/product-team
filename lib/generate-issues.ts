@@ -12,7 +12,7 @@ const issueSchema = z.object({
 });
 
 const rankedIssuesSchema = z.object({
-  researcher_notes: z.string().min(1),
+  user_researcher_notes: z.string().min(1),
   pm_notes: z.string().min(1),
   issues: z.tuple([issueSchema, issueSchema, issueSchema])
 });
@@ -58,7 +58,7 @@ async function repairJsonOutput(raw: string) {
       "Return valid JSON only.",
       "Preserve the meaning of the input.",
       "Use this exact schema:",
-      '{"researcher_notes":"string","pm_notes":"string","issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"}]}'
+      '{"user_researcher_notes":"string","pm_notes":"string","issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"}]}'
     ].join(" "),
     raw
   );
@@ -99,25 +99,43 @@ function formatRepoContext(context: Awaited<ReturnType<typeof getGithubRepoConte
     .join("\n");
 }
 
-export async function generateIssueDrafts(productContext: string): Promise<RankedIssueDrafts> {
-  const normalizedProductContext = productContext.trim();
+function formatProductContext(productDocument: string, problem: string) {
+  return ["product.md:", productDocument, "", "Current product problem:", problem].join("\n");
+}
 
-  if (!normalizedProductContext) {
-    throw new Error("Product brief and problem are required");
+export async function generateIssueDrafts(productDocument: string, problem: string): Promise<RankedIssueDrafts> {
+  const normalizedProductDocument = productDocument.trim();
+  const normalizedProblem = problem.trim();
+
+  if (!normalizedProductDocument) {
+    throw new Error("product.md is required");
+  }
+
+  if (!normalizedProblem) {
+    throw new Error("Problem is required");
   }
 
   const repoContext = await getGithubRepoContext();
   const formattedRepoContext = formatRepoContext(repoContext);
+  const formattedProductContext = formatProductContext(normalizedProductDocument, normalizedProblem);
 
-  const researcherNotes = await runAgent(
+  const userResearcherNotes = await runAgent(
     RESEARCHER_MODEL,
-    "You are Researcher. Work only on the product brief and problem provided. Do not propose solutions yet.",
     [
-      "Analyze the repo context, product brief, and product problem below.",
-      "Return three sections exactly:",
-      "1. Core user pain",
-      "2. Likely root causes",
-      "3. Risks if we solve the wrong thing",
+      "You are User Researcher.",
+      "Work only on the repo context, saved product.md, and current product problem provided.",
+      "Do not propose solutions or implementation details.",
+      "Focus on the user, their context, and what evidence is still missing."
+    ].join(" "),
+    [
+      "Analyze the repo context, saved product.md, and current product problem below.",
+      "Return four sections exactly:",
+      "1. Target user persona",
+      "2. Primary pain and likely workflow breakdown",
+      "3. Top research questions to validate",
+      "4. Missing evidence and research risks",
+      "For the target user persona, name the user type and the job they are trying to get done.",
+      "For the research questions section, provide exactly three bullet points.",
       "Keep it concise and practical.",
       "",
       "Use the repo context to stay grounded in what the product already is.",
@@ -125,7 +143,7 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
       "",
       formattedRepoContext,
       "",
-      normalizedProductContext
+      formattedProductContext
     ].join("\n")
   );
 
@@ -133,7 +151,9 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
     PM_MODEL,
     "You are PM. Turn the research into a tiny backlog. Stay ruthlessly scoped.",
     [
-      "Using the repo context, product brief, product problem, and researcher notes below, propose exactly three issue candidates.",
+      "Using the repo context, saved product.md, current product problem, and user researcher notes below, propose exactly three issue candidates.",
+      "Use the target persona, workflow breakdown, and research questions to make each issue feel grounded in real user behavior.",
+      "Prefer issues that either reduce the user pain directly or close a critical evidence gap before the team builds the wrong thing.",
       "Each candidate should include:",
       "- title",
       "- why",
@@ -144,10 +164,10 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
       "",
       formattedRepoContext,
       "",
-      normalizedProductContext,
+      formattedProductContext,
       "",
-      "Researcher notes:",
-      researcherNotes
+      "User researcher notes:",
+      userResearcherNotes
     ].join("\n")
   );
 
@@ -159,16 +179,16 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
       "Pick the best three issue drafts, rank them from highest priority to lowest priority, and keep them demoable.",
       "Use the repo context to prefer issues that fit the current product and avoid obvious duplicates of recent open issues.",
       "Use this exact schema:",
-      '{"researcher_notes":"string","pm_notes":"string","issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"}]}',
+      '{"user_researcher_notes":"string","pm_notes":"string","issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"}]}',
       "Do not include markdown fences. Do not return more than three issues."
     ].join(" "),
     [
       formattedRepoContext,
       "",
-      normalizedProductContext,
+      formattedProductContext,
       "",
-      "Researcher notes:",
-      researcherNotes,
+      "User researcher notes:",
+      userResearcherNotes,
       "",
       "PM notes:",
       pmNotes

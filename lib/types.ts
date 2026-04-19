@@ -8,7 +8,7 @@ export type IssueDraft = {
 };
 
 export type RankedIssueDrafts = {
-  researcher_notes: string;
+  user_researcher_notes: string;
   pm_notes: string;
   issues: [IssueDraft, IssueDraft, IssueDraft];
 };

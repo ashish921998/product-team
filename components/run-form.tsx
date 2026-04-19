@@ -1,62 +1,102 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import type { ProductTeamRunResult } from "@/lib/types";
+import type { IssueDraft, IssuePriority, ProductTeamRunResult } from "@/lib/types";
 
-const EXAMPLE_INPUTS = [
-  "Product brief: B2B SaaS for startup finance teams to manage invoices and approvals. Problem: Users sign up but never return after day 3.",
-  "Product brief: Shopify app that helps merchants recover abandoned carts with SMS campaigns. Problem: Checkout conversion dropped 30% last month.",
-  "Product brief: Consumer habit tracker for busy professionals on iPhone and web. Problem: Mobile users complete fewer actions than desktop."
+const PRODUCT_MD_STORAGE_KEY = "productteam.product-md";
+
+const DEFAULT_PRODUCT_MD = `# Product
+
+## One-liner
+AI product team in a box that turns product problems into ranked GitHub issues.
+
+## Target users
+- Product teams shipping quickly with limited PM or research bandwidth
+- Founders or builders who need backlog direction fast
+
+## Core workflow
+- User shares product context once in product.md
+- User enters one current product problem
+- ProductTeam.ai runs User Researcher -> PM -> Head of Product
+- App returns exactly 3 ranked issue drafts and creates them in GitHub
+
+## Constraints
+- Single-page demo
+- Hardcoded GitHub repo
+- Exactly 3 issues per run
+- Keep outputs tightly scoped and demoable`;
+
+const EXAMPLE_PROBLEMS = [
+  "New users sign up but rarely come back after day 3.",
+  "Checkout conversion dropped 30% last month.",
+  "Mobile users complete fewer key actions than desktop users."
 ];
 
-type AgentState = "idle" | "active" | "done";
 type AgentKey = "researcher" | "pm" | "head";
+type AgentState = "idle" | "active" | "done";
 
 const AGENTS: {
   key: AgentKey;
   name: string;
+  role: string;
   model: string;
-  task: string;
-  icon: "search" | "clipboard" | "crown";
+  bio: string;
+  initial: string;
+  avatarClass: string;
 }[] = [
   {
     key: "researcher",
-    name: "Researcher",
-    model: "Claude Haiku",
-    task: "Maps user pain & root causes",
-    icon: "search"
+    name: "Ana",
+    role: "User Researcher",
+    model: "claude-haiku-4-5",
+    bio: "Reads your brief. Maps the core user pain, likely root causes, and risks of solving the wrong thing first.",
+    initial: "A",
+    avatarClass: "bg-gradient-to-br from-[#e7c49b] to-[#c65a2e]"
   },
   {
     key: "pm",
-    name: "PM",
-    model: "Claude Haiku",
-    task: "Drafts 3 scoped issue candidates",
-    icon: "clipboard"
+    name: "Juno",
+    role: "Product Manager",
+    model: "claude-haiku-4-5",
+    bio: "Takes Ana's notes and drafts three tightly scoped, demoable issue candidates with acceptance criteria.",
+    initial: "J",
+    avatarClass: "bg-gradient-to-br from-[#efd48e] to-[#a06a1a]"
   },
   {
     key: "head",
-    name: "Head of Product",
-    model: "Claude Sonnet",
-    task: "Ranks & returns final JSON",
-    icon: "crown"
+    name: "Rex",
+    role: "Head of Product",
+    model: "claude-sonnet-4-5",
+    bio: "Reads Ana and Juno, disagrees when needed, ranks the top three candidates P1 to P3 and files the issues.",
+    initial: "R",
+    avatarClass: "bg-gradient-to-br from-[#bcc8a8] to-[#5f724a]"
   }
 ];
 
-const RANK_META = [
-  { rank: 1, priority: "P1", label: "Highest priority" },
-  { rank: 2, priority: "P2", label: "Next up" },
-  { rank: 3, priority: "P3", label: "Nice to have" }
-];
-
-const PRIORITY_STYLES: Record<string, string> = {
-  P1: "border-rose-400/40 bg-rose-400/10 text-rose-200",
-  P2: "border-amber-300/40 bg-amber-300/10 text-amber-100",
-  P3: "border-sky-300/40 bg-sky-300/10 text-sky-100"
+const RANK_ROMAN = ["I", "II", "III"];
+const RANK_COLOR = ["#c65a2e", "#a06a1a", "#5f724a"];
+const RANK_LABEL: Record<IssuePriority, string> = {
+  P1: "Highest",
+  P2: "Next up",
+  P3: "Nice to have"
 };
 
+function firstSentence(text: string, fallback: string, maxLen = 200) {
+  if (!text) return fallback;
+  const trimmed = text.trim();
+  const match = trimmed.match(/^([^\n.]+[.!?])/);
+  const candidate = (match?.[1] ?? trimmed).trim();
+  if (candidate.length <= maxLen) return candidate;
+  return candidate.slice(0, maxLen - 1).trimEnd() + "…";
+}
+
 export function RunForm() {
-  const [productContext, setProductContext] = useState(EXAMPLE_INPUTS[0]);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const [productDocument, setProductDocument] = useState("");
+  const [productDocumentDraft, setProductDocumentDraft] = useState(DEFAULT_PRODUCT_MD);
+  const [isEditingProductDocument, setIsEditingProductDocument] = useState(false);
+  const [problem, setProblem] = useState(EXAMPLE_PROBLEMS[0]);
   const [result, setResult] = useState<ProductTeamRunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -65,10 +105,34 @@ export function RunForm() {
   const stageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    const saved = window.localStorage.getItem(PRODUCT_MD_STORAGE_KEY)?.trim();
+    if (saved) {
+      setProductDocument(saved);
+      setProductDocumentDraft(saved);
+    }
+    setHasHydrated(true);
+
     return () => {
       if (stageTimerRef.current) clearTimeout(stageTimerRef.current);
     };
   }, []);
+
+  function saveProductDocument(next: string) {
+    const normalized = next.trim();
+    setProductDocument(normalized);
+    setProductDocumentDraft(normalized || DEFAULT_PRODUCT_MD);
+    window.localStorage.setItem(PRODUCT_MD_STORAGE_KEY, normalized);
+  }
+
+  function handleSaveProductDocument() {
+    if (!productDocumentDraft.trim()) {
+      setError("product.md is required");
+      return;
+    }
+    saveProductDocument(productDocumentDraft);
+    setIsEditingProductDocument(false);
+    setError(null);
+  }
 
   function cycleStages() {
     const sequence: AgentKey[] = ["researcher", "pm", "head"];
@@ -98,6 +162,15 @@ export function RunForm() {
     event.preventDefault();
     if (submissionInFlightRef.current) return;
 
+    if (!productDocument.trim()) {
+      setError("Save product.md before convening the team.");
+      return;
+    }
+    if (!problem.trim()) {
+      setError("Add a product problem to triage.");
+      return;
+    }
+
     submissionInFlightRef.current = true;
     setIsSubmitting(true);
     setError(null);
@@ -105,11 +178,11 @@ export function RunForm() {
     cycleStages();
 
     try {
-        const response = await fetch("/api/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ product_context: productContext })
-        });
+      const response = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ product_md: productDocument, problem })
+      });
       const data = (await response.json()) as ProductTeamRunResult | { error: string };
       if (!response.ok || "error" in data) {
         throw new Error("error" in data ? data.error : "Run failed");
@@ -128,460 +201,584 @@ export function RunForm() {
   }
 
   return (
-    <div className="relative z-10 flex flex-col gap-10">
-      <Header />
-      <Hero />
+    <>
+      <Masthead />
 
-      <section className="rounded-[28px] border border-white/10 bg-white/[0.02] p-5 shadow-2xl shadow-black/40 backdrop-blur-sm lg:p-8">
-        <Pipeline
-          productContext={productContext}
-          setProductContext={setProductContext}
-          onSubmit={handleSubmit}
-          isSubmitting={isSubmitting}
-          agentState={agentState}
-          result={result}
-          error={error}
-        />
+      <section className="mx-auto max-w-6xl px-6 pb-40 pt-12 lg:px-8 lg:pt-16">
+        {!hasHydrated ? (
+          <LoadingState />
+        ) : !productDocument ? (
+          <ProductDocumentSetup
+            productDocumentDraft={productDocumentDraft}
+            setProductDocumentDraft={setProductDocumentDraft}
+            onSubmit={handleSaveProductDocument}
+            error={error}
+          />
+        ) : (
+          <>
+            <HeroAndBrief
+              problem={problem}
+              setProblem={setProblem}
+              isSubmitting={isSubmitting}
+              productDocument={productDocument}
+              productDocumentDraft={productDocumentDraft}
+              setProductDocumentDraft={setProductDocumentDraft}
+              isEditingProductDocument={isEditingProductDocument}
+              setIsEditingProductDocument={setIsEditingProductDocument}
+              onSaveProductDocument={handleSaveProductDocument}
+            />
+
+            <TeamRoster agentState={agentState} result={result} />
+
+            <StandupOutput
+              result={result}
+              isSubmitting={isSubmitting}
+              error={error}
+            />
+          </>
+        )}
       </section>
 
-      {result ? <NotesPanels result={result} /> : null}
-    </div>
+      {productDocument ? (
+        <Composer
+          problem={problem}
+          setProblem={setProblem}
+          onSubmit={handleSubmit}
+          isSubmitting={isSubmitting}
+          error={error}
+        />
+      ) : null}
+    </>
   );
 }
 
-function Header() {
+function Masthead() {
   return (
-    <header className="flex items-center justify-between">
-      <div className="flex items-center gap-3">
-        <span className="relative flex h-2.5 w-2.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-400" />
-        </span>
-        <p className="text-sm font-semibold tracking-tight text-white">
-          ProductTeam<span className="text-cyan-300">.ai</span>
-        </p>
-      </div>
-      <div className="hidden items-center gap-4 text-xs text-white/40 sm:flex">
-        <span>Built for OnCode Buildathon</span>
-        <span className="h-1 w-1 rounded-full bg-white/20" />
-        <span>Powered by Claude</span>
+    <header className="border-b border-[#1a181533]">
+      <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5 lg:px-8">
+        <div className="flex items-baseline gap-3">
+          <span className="serif text-2xl italic">
+            ProductTeam<span className="text-[#c65a2e]">.ai</span>
+          </span>
+          <span className="mono hidden text-[10px] uppercase tracking-[0.3em] text-[#7a7264] sm:inline">
+            No. 001 · Vol. I
+          </span>
+        </div>
       </div>
     </header>
   );
 }
 
-function Hero() {
+function LoadingState() {
   return (
-    <div className="max-w-4xl">
-      <p className="text-xs font-semibold uppercase tracking-[0.35em] text-cyan-300/80">
-        AI product team in a box
-      </p>
-      <h1 className="mt-4 text-5xl font-semibold leading-[1.05] tracking-tight text-white sm:text-6xl">
-        Vague product problem in.
-        <br />
-        <span className="bg-gradient-to-r from-cyan-200 via-sky-200 to-violet-200 bg-clip-text text-transparent">
-          Prioritized GitHub backlog out.
-        </span>
-      </h1>
-      <p className="mt-5 max-w-2xl text-base leading-7 text-white/60">
-        One input. Add a short product brief plus the problem. Three agents reason in sequence and
-        create three ranked GitHub issues in your repo before you finish your coffee.
-      </p>
+    <div className="mono py-24 text-center text-[12px] uppercase tracking-[0.25em] text-[#7a7264]">
+      loading saved product context…
     </div>
   );
 }
 
-function Pipeline(props: {
-  productContext: string;
-  setProductContext: (v: string) => void;
-  onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
-  isSubmitting: boolean;
-  agentState: (key: AgentKey) => AgentState;
-  result: ProductTeamRunResult | null;
+function ProductDocumentSetup(props: {
+  productDocumentDraft: string;
+  setProductDocumentDraft: (v: string) => void;
+  onSubmit: () => void;
   error: string | null;
 }) {
-  const { productContext, setProductContext, onSubmit, isSubmitting, agentState, result, error } = props;
+  const { productDocumentDraft, setProductDocumentDraft, onSubmit, error } = props;
 
-  return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(260px,1.15fr)_28px_minmax(180px,0.9fr)_28px_minmax(180px,0.9fr)_28px_minmax(180px,0.9fr)_28px_minmax(280px,1.15fr)] xl:items-stretch">
-      <ProblemNode
-        productContext={productContext}
-        setProductContext={setProductContext}
-        onSubmit={onSubmit}
-        isSubmitting={isSubmitting}
-        error={error}
-      />
-
-      <FlowConnector active={isSubmitting || !!result} />
-
-      {AGENTS.map((agent, idx) => {
-        const state = agentState(agent.key);
-        const nextActive = state === "done" || (idx === AGENTS.length - 1 && !!result);
-        return (
-          <AgentWithFlow
-            key={agent.key}
-            name={agent.name}
-            model={agent.model}
-            task={agent.task}
-            icon={agent.icon}
-            state={state}
-            connectorActive={nextActive}
-          />
-        );
-      })}
-
-      <OutputNode result={result} isSubmitting={isSubmitting} />
-    </div>
-  );
-}
-
-function AgentWithFlow(props: {
-  name: string;
-  model: string;
-  task: string;
-  icon: "search" | "clipboard" | "crown";
-  state: AgentState;
-  connectorActive: boolean;
-}) {
-  return (
-    <>
-      <AgentNode
-        name={props.name}
-        model={props.model}
-        task={props.task}
-        icon={props.icon}
-        state={props.state}
-      />
-      <FlowConnector active={props.connectorActive} />
-    </>
-  );
-}
-
-function ProblemNode(props: {
-  productContext: string;
-  setProductContext: (v: string) => void;
-  onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
-  isSubmitting: boolean;
-  error: string | null;
-}) {
-  const { productContext, setProductContext, onSubmit, isSubmitting, error } = props;
   return (
     <form
-      onSubmit={onSubmit}
-      className="flex flex-col rounded-3xl border border-cyan-300/30 bg-[#0e141c] p-5 shadow-[0_0_40px_-20px_rgba(34,211,238,0.6)]"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+      className="mx-auto max-w-4xl"
     >
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.28em] text-cyan-300/80">
-          Input
-        </span>
-        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-white/50">
-          input
-        </span>
-      </div>
+      <p className="mono text-[11px] uppercase tracking-[0.35em] text-[#c65a2e]">Step 01</p>
+      <h1 className="serif mt-6 text-[56px] leading-[0.95] tracking-tight sm:text-[72px]">
+        Save your <em>product.md</em>.
+      </h1>
 
-      <textarea
-        value={productContext}
-        onChange={(e) => setProductContext(e.target.value)}
-        placeholder="Product brief: B2B analytics tool for ecommerce teams. Problem: Users sign up but never return after day 3."
-        disabled={isSubmitting}
-        className="mt-3 h-32 w-full resize-none rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm leading-6 text-white outline-none transition focus:border-cyan-300/60 disabled:opacity-60"
-        required
-      />
+      <div className="rule my-8 w-32" />
 
-      <p className="mt-3 text-xs leading-5 text-white/50">
-        Include who the product is for, what it does, and the product problem you want triaged.
+      <p className="max-w-2xl text-[15.5px] leading-8 text-[#3a342d]">
+        <span className="serif italic">product.md</span> is the durable context your team reads on
+        every run. We store it in your browser with <span className="mono text-[13px]">localStorage</span>
+        so you only do this once. Write what the product is, who it is for, the core workflow, and
+        any important constraints.
       </p>
 
-      <div className="mt-3 space-y-1.5">
-        {EXAMPLE_INPUTS.map((example) => (
+      <div className="mt-10 rounded-3xl border border-[#1a181522] bg-white p-6 shadow-[0_40px_80px_-40px_rgba(26,24,21,0.25)]">
+        <div className="flex items-center justify-between">
+          <span className="mono text-[10px] uppercase tracking-[0.3em] text-[#7a7264]">
+            product.md
+          </span>
+          <span className="mono text-[10px] text-[#b4a99a]">saved locally</span>
+        </div>
+
+        <textarea
+          value={productDocumentDraft}
+          onChange={(e) => setProductDocumentDraft(e.target.value)}
+          placeholder="# Product"
+          required
+          className="mono mt-4 h-[420px] w-full resize-none rounded-2xl border border-[#1a18151a] bg-[#faf7f0] p-4 text-[13px] leading-6 text-[#1a1815] outline-none transition focus:border-[#c65a2e]"
+        />
+
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-[12px] leading-5 text-[#7a7264]">
+            Keep it short. Ana and Juno read this before every meeting.
+          </p>
           <button
-            type="button"
-            key={example}
-            onClick={() => setProductContext(example)}
-            disabled={isSubmitting}
-            className="block w-full truncate rounded-md border border-white/5 bg-white/[0.02] px-2.5 py-1.5 text-left text-xs text-white/55 transition hover:border-cyan-300/30 hover:text-white disabled:opacity-50"
+            type="submit"
+            className="inline-flex h-11 items-center justify-center rounded-xl bg-[#c65a2e] px-5 text-sm font-semibold text-white transition hover:opacity-90"
           >
-            {example}
+            Save product.md and continue →
           </button>
-        ))}
+        </div>
+
+        {error ? (
+          <p className="mt-4 rounded-lg border border-[#c65a2e] bg-[#c65a2e]/[0.06] px-3 py-2 text-[12px] text-[#1a1815]">
+            {error}
+          </p>
+        ) : null}
       </div>
-
-      <button
-        type="submit"
-        disabled={isSubmitting}
-        className="mt-4 inline-flex h-11 items-center justify-center rounded-xl bg-cyan-300 px-4 text-sm font-semibold text-slate-950 shadow-[0_0_30px_-10px_rgba(34,211,238,0.9)] transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:bg-cyan-300/40"
-      >
-        {isSubmitting ? "Running pipeline..." : "Create 3 GitHub issues →"}
-      </button>
-
-      {error ? (
-        <p className="mt-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
-          {error}
-        </p>
-      ) : null}
     </form>
   );
 }
 
-function AgentNode(props: {
-  name: string;
-  model: string;
-  task: string;
-  icon: "search" | "clipboard" | "crown";
-  state: AgentState;
-}) {
-  const { name, model, task, icon, state } = props;
-
-  const border =
-    state === "active"
-      ? "border-cyan-300/60 shadow-[0_0_50px_-10px_rgba(34,211,238,0.55)]"
-      : state === "done"
-      ? "border-emerald-300/40 shadow-[0_0_30px_-18px_rgba(52,211,153,0.6)]"
-      : "border-white/10";
-
-  const dotColor =
-    state === "active" ? "bg-cyan-300" : state === "done" ? "bg-emerald-400" : "bg-white/20";
-  const dotPulse = state === "active" ? "pulse-dot" : "";
-
-  const iconTint =
-    state === "active" ? "text-cyan-300" : state === "done" ? "text-emerald-300" : "text-white/40";
-
-  const iconBg =
-    state === "active"
-      ? "border-cyan-300/40 bg-cyan-300/10"
-      : state === "done"
-      ? "border-emerald-300/30 bg-emerald-300/10"
-      : "border-white/10 bg-white/[0.03]";
-
-  return (
-    <div
-      className={`flex flex-col rounded-3xl border ${border} bg-[#0e141c] p-5 transition-all duration-500`}
-    >
-      <div className="flex items-center justify-between">
-        <span
-          className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border ${iconBg} ${iconTint} transition-colors duration-500`}
-        >
-          <AgentIcon kind={icon} />
-        </span>
-        <span className={`h-2 w-2 rounded-full ${dotColor} ${dotPulse}`} />
-      </div>
-
-      <p className="mt-4 text-lg font-semibold text-white">{name}</p>
-      <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-cyan-300/70">
-        {model}
-      </p>
-      <p className="mt-3 text-sm leading-6 text-white/55">{task}</p>
-
-      <div className="mt-auto pt-4">
-        <StatusPill state={state} />
-      </div>
-    </div>
-  );
-}
-
-function AgentIcon({ kind }: { kind: "search" | "clipboard" | "crown" }) {
-  const stroke = "currentColor";
-  const common = { fill: "none", stroke, strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round" } as const;
-  if (kind === "search") {
-    return (
-      <svg viewBox="0 0 24 24" className="h-4 w-4" {...common}>
-        <circle cx="11" cy="11" r="6" />
-        <path d="m20 20-4.3-4.3" />
-      </svg>
-    );
-  }
-  if (kind === "clipboard") {
-    return (
-      <svg viewBox="0 0 24 24" className="h-4 w-4" {...common}>
-        <rect x="5" y="5" width="14" height="16" rx="2" />
-        <path d="M9 5V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1" />
-        <path d="M8.5 11h7M8.5 14.5h7M8.5 18h4" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 24 24" className="h-4 w-4" {...common}>
-      <path d="M3 8l4 4 5-7 5 7 4-4-2 11H5L3 8z" />
-      <path d="M7 20h10" />
-    </svg>
-  );
-}
-
-function StatusPill({ state }: { state: AgentState }) {
-  if (state === "idle") {
-    return <span className="text-[11px] font-medium text-white/40">Idle</span>;
-  }
-  if (state === "active") {
-    return (
-      <span className="inline-flex items-center gap-2 text-[11px] font-semibold text-cyan-200">
-        <span className="h-1.5 w-1.5 rounded-full bg-cyan-300 pulse-dot" />
-        Thinking...
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-2 text-[11px] font-semibold text-emerald-300">
-      <svg viewBox="0 0 12 12" className="h-3 w-3 fill-none stroke-emerald-300" strokeWidth="2">
-        <path d="M2 6.5 5 9.5 10 3.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-      Done
-    </span>
-  );
-}
-
-function FlowConnector({ active }: { active: boolean }) {
-  const gradId = active ? "flow-grad-active" : "flow-grad-idle";
-  return (
-    <div className="flex items-center justify-center">
-      <svg viewBox="0 0 48 28" className="h-8 w-12 rotate-90 xl:rotate-0">
-        <defs>
-          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor={active ? "#22d3ee" : "rgba(255,255,255,0.25)"} stopOpacity={active ? "0.3" : "1"} />
-            <stop offset="100%" stopColor={active ? "#22d3ee" : "rgba(255,255,255,0.25)"} stopOpacity="1" />
-          </linearGradient>
-        </defs>
-        <line
-          x1="2"
-          y1="14"
-          x2="38"
-          y2="14"
-          stroke={`url(#${gradId})`}
-          strokeWidth={active ? "3" : "2"}
-          strokeLinecap="round"
-          className={active ? "flow-line" : ""}
-        />
-        <polygon
-          points="36,6 46,14 36,22"
-          fill={active ? "#22d3ee" : "rgba(255,255,255,0.35)"}
-          className={active ? "drop-shadow-[0_0_6px_rgba(34,211,238,0.8)]" : ""}
-        />
-      </svg>
-    </div>
-  );
-}
-
-function OutputNode({
-  result,
-  isSubmitting
-}: {
-  result: ProductTeamRunResult | null;
+function HeroAndBrief(props: {
+  problem: string;
+  setProblem: (v: string) => void;
   isSubmitting: boolean;
+  productDocument: string;
+  productDocumentDraft: string;
+  setProductDocumentDraft: (v: string) => void;
+  isEditingProductDocument: boolean;
+  setIsEditingProductDocument: (v: boolean) => void;
+  onSaveProductDocument: () => void;
 }) {
+  const {
+    problem,
+    setProblem,
+    isSubmitting,
+    productDocument,
+    productDocumentDraft,
+    setProductDocumentDraft,
+    isEditingProductDocument,
+    setIsEditingProductDocument,
+    onSaveProductDocument
+  } = props;
+
   return (
-    <div className="flex flex-col rounded-3xl border border-white/10 bg-[#0e141c] p-5">
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.28em] text-white/50">
-          Output
-        </span>
-        <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-white/50">
-          <GithubIcon /> GitHub
-        </span>
+    <div className="grid gap-12 lg:grid-cols-[1.3fr_0.9fr]">
+      <div>
+        <p className="mono text-[11px] uppercase tracking-[0.35em] text-[#7a7264]">
+          The Standup Edition
+        </p>
+        <h1 className="serif mt-6 text-[56px] leading-[0.95] tracking-tight sm:text-[76px]">
+          Three teammates.
+          <br />
+          <em>One</em> standup.
+          <br />
+          Three shipped issues.
+        </h1>
+
+        <div className="rule my-8 w-32" />
+
+        <p className="max-w-xl text-[15.5px] leading-8 text-[#3a342d]">
+          <span className="serif italic">Ana, Juno, and Rex</span> read your{" "}
+          <span className="mono text-[13px]">product.md</span> plus today's problem, argue about
+          priorities, and file three real GitHub issues in your repo before you finish pouring
+          coffee.
+        </p>
+
+        {/* product.md panel */}
+        <div className="mt-8 rounded-2xl border border-[#1a181522] bg-white p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="mono text-[10px] uppercase tracking-[0.3em] text-[#7a7264]">
+                product.md · saved locally
+              </p>
+              <p className="serif mt-1 text-[15px] italic text-[#3a342d]">
+                {firstSentence(productDocument, "Product context ready.", 120)}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setProductDocumentDraft(productDocument);
+                setIsEditingProductDocument(!isEditingProductDocument);
+              }}
+              disabled={isSubmitting}
+              className="mono shrink-0 rounded-lg border border-[#1a181522] bg-[#faf7f0] px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-[#5a5248] transition hover:border-[#c65a2e] hover:text-[#c65a2e] disabled:opacity-50"
+            >
+              {isEditingProductDocument ? "Close" : "Edit"}
+            </button>
+          </div>
+
+          {isEditingProductDocument ? (
+            <div className="mt-4">
+              <textarea
+                value={productDocumentDraft}
+                onChange={(e) => setProductDocumentDraft(e.target.value)}
+                disabled={isSubmitting}
+                className="mono h-64 w-full resize-none rounded-xl border border-[#1a181522] bg-[#faf7f0] p-3 text-[13px] leading-6 outline-none focus:border-[#c65a2e]"
+                required
+              />
+              <div className="mt-3 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProductDocumentDraft(productDocument);
+                    setIsEditingProductDocument(false);
+                  }}
+                  disabled={isSubmitting}
+                  className="text-[12px] text-[#7a7264] transition hover:text-[#1a1815] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={onSaveProductDocument}
+                  disabled={isSubmitting}
+                  className="inline-flex h-9 items-center justify-center rounded-lg border border-[#c65a2e] bg-[#c65a2e]/[0.08] px-3 text-[12px] font-semibold text-[#c65a2e] transition hover:bg-[#c65a2e]/[0.14] disabled:opacity-50"
+                >
+                  Save product.md
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
 
-      {!result ? (
-        <div className="mt-4 flex flex-1 flex-col gap-2">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className={`h-20 rounded-xl border border-dashed ${
-                isSubmitting ? "border-cyan-300/30" : "border-white/10"
-              }`}
-            />
-          ))}
-          <p className="mt-auto pt-3 text-[11px] text-white/35">
-            {isSubmitting ? "Issues materializing..." : "3 ranked GitHub issues will appear here"}
+      <aside>
+        <div className="sticky top-6 rounded-3xl border border-[#1a181522] bg-white p-6 shadow-[0_40px_80px_-40px_rgba(26,24,21,0.25)]">
+          <div className="flex items-center justify-between">
+            <span className="mono text-[10px] uppercase tracking-[0.3em] text-[#7a7264]">
+              Today's dispatch
+            </span>
+            <span className="mono text-[10px] text-[#b4a99a]">#brief-live</span>
+          </div>
+
+          <textarea
+            value={problem}
+            onChange={(e) => setProblem(e.target.value)}
+            disabled={isSubmitting}
+            placeholder="Users sign up but never return after day 3."
+            required
+            className="serif mt-4 h-32 w-full resize-none rounded-2xl border border-[#1a181520] bg-[#faf7f0] p-4 text-[18px] leading-[1.4] italic text-[#1a1815] outline-none transition focus:border-[#c65a2e] disabled:opacity-60"
+          />
+
+          <p className="mono mt-3 text-[10px] uppercase tracking-[0.22em] text-[#b4a99a]">
+            Example problems
           </p>
-        </div>
-      ) : (
-        <div className="mt-4 flex flex-col gap-3">
-          {result.issues.map((issue, i) => {
-            const created = result.created_issues[i];
-            const priorityStyle = PRIORITY_STYLES[issue.priority] ?? PRIORITY_STYLES.P3;
-            return (
-              <a
-                key={created.url}
-                href={created.url}
-                target="_blank"
-                rel="noreferrer"
-                className="fade-in-up group rounded-xl border border-white/10 bg-white/[0.03] p-3 transition hover:border-cyan-300/40 hover:bg-white/[0.05]"
-                style={{ animationDelay: `${i * 80}ms` }}
+          <div className="mt-2 space-y-1.5">
+            {EXAMPLE_PROBLEMS.map((example) => (
+              <button
+                key={example}
+                type="button"
+                onClick={() => setProblem(example)}
+                disabled={isSubmitting}
+                className="block w-full truncate rounded-md border border-[#1a18150f] bg-[#faf7f0] px-3 py-1.5 text-left text-[12px] text-[#5a5248] transition hover:border-[#c65a2e] hover:text-[#c65a2e] disabled:opacity-50"
               >
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-sm font-semibold leading-5 text-white">{issue.title}</p>
-                  <span
-                    className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${priorityStyle}`}
-                  >
-                    {issue.priority}
-                  </span>
-                </div>
-                <div className="mt-2 flex items-center justify-between text-[11px] text-white/45">
-                  <span className="inline-flex items-center gap-1">
-                    <GithubIcon /> #{created.number}
-                  </span>
-                  <span className="text-cyan-300 opacity-0 transition group-hover:opacity-100">
-                    open →
-                  </span>
-                </div>
-              </a>
-            );
-          })}
+                {example}
+              </button>
+            ))}
+          </div>
         </div>
-      )}
+      </aside>
     </div>
   );
 }
 
-function NotesPanels({ result }: { result: ProductTeamRunResult }) {
+function TeamRoster({
+  agentState,
+  result
+}: {
+  agentState: (key: AgentKey) => AgentState;
+  result: ProductTeamRunResult | null;
+}) {
   return (
-    <section className="grid gap-4 md:grid-cols-3">
-      <NoteCard title="Researcher" model="Claude Haiku" body={result.researcher_notes} tone="cyan" />
-      <NoteCard title="PM" model="Claude Haiku" body={result.pm_notes} tone="violet" />
-      <NoteCard
-        title="Head of Product"
-        model="Claude Sonnet"
-        body={`Ranked ${result.issues.length} issues from ${result.issues[0]?.priority ?? "P1"} to ${
-          result.issues[result.issues.length - 1]?.priority ?? "P3"
-        } and created them in GitHub.`}
-        tone="emerald"
-      />
+    <section className="mt-20">
+      <div className="flex items-end justify-between">
+        <div>
+          <p className="mono text-[11px] uppercase tracking-[0.35em] text-[#7a7264]">
+            Meet the team
+          </p>
+          <h2 className="serif mt-3 text-3xl sm:text-4xl">
+            Three teammates. <em>Three models.</em>
+          </h2>
+        </div>
+      </div>
+
+      <div className="mt-10 grid gap-4 sm:grid-cols-3">
+        {AGENTS.map((agent) => {
+          const state = agentState(agent.key);
+          const note =
+            result && agent.key === "researcher"
+              ? firstSentence(result.user_researcher_notes, agent.bio)
+              : result && agent.key === "pm"
+              ? firstSentence(result.pm_notes, agent.bio)
+              : result && agent.key === "head"
+              ? `Ranked ${result.issues.length} issues · ${result.issues[0]?.priority ?? "P1"} to ${
+                  result.issues[result.issues.length - 1]?.priority ?? "P3"
+                }. Filed in GitHub.`
+              : agent.bio;
+
+          return (
+            <article
+              key={agent.key}
+              className={`fade-in-up rounded-2xl border bg-white p-5 transition-all ${
+                state === "active"
+                  ? "border-[#c65a2e] shadow-[0_0_0_4px_rgba(198,90,46,0.08)]"
+                  : "border-[#1a181522]"
+              }`}
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`flex h-11 w-11 items-center justify-center rounded-full text-white text-[15px] font-semibold ${agent.avatarClass}`}
+                  >
+                    {agent.initial}
+                  </div>
+                  <div>
+                    <p className="text-[15px] font-semibold text-[#1a1815]">{agent.name}</p>
+                    <p className="text-[11px] text-[#7a7264]">{agent.role}</p>
+                  </div>
+                </div>
+                <AgentStatus state={state} />
+              </div>
+
+              <p className="mono mt-4 text-[10px] uppercase tracking-[0.22em] text-[#7a7264]">
+                {agent.model}
+              </p>
+
+              <p className="mt-3 text-[13px] leading-6 text-[#3a342d]">{note}</p>
+            </article>
+          );
+        })}
+      </div>
     </section>
   );
 }
 
-function NoteCard({
-  title,
-  model,
-  body,
-  tone
-}: {
-  title: string;
-  model: string;
-  body: string;
-  tone: "cyan" | "violet" | "emerald";
-}) {
-  const toneClass = useMemo(() => {
-    if (tone === "violet") return "text-violet-200";
-    if (tone === "emerald") return "text-emerald-200";
-    return "text-cyan-200";
-  }, [tone]);
-
-  return (
-    <article className="fade-in-up rounded-2xl border border-white/10 bg-white/[0.02] p-5">
-      <div className="flex items-center justify-between">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-white/40">{title}</p>
-        <span className={`text-[10px] font-semibold uppercase tracking-[0.18em] ${toneClass}`}>
-          {model}
+function AgentStatus({ state }: { state: AgentState }) {
+  if (state === "active") {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="flex items-center gap-1">
+          <span className="typing-dot h-1 w-1 rounded-full bg-[#c65a2e]" />
+          <span className="typing-dot h-1 w-1 rounded-full bg-[#c65a2e]" />
+          <span className="typing-dot h-1 w-1 rounded-full bg-[#c65a2e]" />
+        </span>
+        <span className="mono text-[10px] uppercase tracking-[0.2em] text-[#c65a2e]">
+          Working
         </span>
       </div>
-      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-white/70">{body}</p>
-    </article>
+    );
+  }
+  if (state === "done") {
+    return (
+      <span className="mono text-[10px] uppercase tracking-[0.2em] text-[#5f724a]">Done</span>
+    );
+  }
+  return (
+    <span className="mono text-[10px] uppercase tracking-[0.2em] text-[#b4a99a]">Standing by</span>
   );
 }
 
-function GithubIcon() {
+function StandupOutput({
+  result,
+  isSubmitting,
+  error
+}: {
+  result: ProductTeamRunResult | null;
+  isSubmitting: boolean;
+  error: string | null;
+}) {
   return (
-    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-white/50" aria-hidden="true">
-      <path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.42 7.42 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
-    </svg>
+    <section className="mt-24">
+      <div className="flex items-end justify-between">
+        <div>
+          <p className="mono text-[11px] uppercase tracking-[0.35em] text-[#7a7264]">
+            Standup output
+          </p>
+          <h2 className="serif mt-3 text-3xl sm:text-4xl">
+            {result ? (
+              <>
+                The team filed <em>three</em> issues.
+              </>
+            ) : isSubmitting ? (
+              <>
+                The team is <em>in session</em>…
+              </>
+            ) : (
+              <>
+                Waiting on <em>the next brief</em>.
+              </>
+            )}
+          </h2>
+        </div>
+        {result ? (
+          <p className="mono hidden text-[11px] text-[#7a7264] sm:block">
+            ashish921998/product-team · just now
+          </p>
+        ) : null}
+      </div>
+
+      {error ? (
+        <div className="mt-8 rounded-2xl border border-[#c65a2e] bg-[#c65a2e]/[0.05] px-5 py-4 text-[13.5px] text-[#1a1815]">
+          <span className="mono mr-2 text-[11px] uppercase tracking-[0.2em] text-[#c65a2e]">
+            Error
+          </span>
+          {error}
+        </div>
+      ) : null}
+
+      {!result ? (
+        <div className="mt-10 space-y-0">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className={`grid grid-cols-[48px_1fr_160px_80px] items-start gap-6 border-t border-[#1a181522] py-6 ${
+                isSubmitting ? "opacity-70" : "opacity-40"
+              }`}
+            >
+              <span className="serif text-4xl italic text-[#b4a99a]">{RANK_ROMAN[i]}</span>
+              <div>
+                <div className="h-4 w-3/4 rounded bg-[#1a18150a]" />
+                <div className="mt-3 h-3 w-5/6 rounded bg-[#1a181508]" />
+                <div className="mt-2 h-3 w-2/3 rounded bg-[#1a181508]" />
+              </div>
+              <span className="mono text-[10px] uppercase tracking-[0.18em] text-[#b4a99a]">
+                P{i + 1} · {RANK_LABEL[`P${i + 1}` as IssuePriority]}
+              </span>
+              <span className="mono justify-self-end text-[11px] text-[#b4a99a]">— —</span>
+            </div>
+          ))}
+          <div className="border-t border-[#1a181522]" />
+          <p className="mono mt-4 text-[11px] text-[#7a7264]">
+            {isSubmitting
+              ? "Three issues materializing…"
+              : "Drop a brief below. Ana takes it from there."}
+          </p>
+        </div>
+      ) : (
+        <div className="mt-10">
+          {result.issues.map((issue, i) => (
+            <StandupRow
+              key={result.created_issues[i].url}
+              index={i}
+              issue={issue}
+              number={result.created_issues[i].number}
+              url={result.created_issues[i].url}
+            />
+          ))}
+          <div className="border-t border-[#1a181522]" />
+          <p className="mono mt-5 text-[11px] leading-5 text-[#7a7264]">
+            ✓ {result.issues.length} issues filed in ashish921998/product-team · Ana, Juno, and Rex
+            closed out the standup.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function StandupRow({
+  index,
+  issue,
+  number,
+  url
+}: {
+  index: number;
+  issue: IssueDraft;
+  number: number;
+  url: string;
+}) {
+  const rankColor = RANK_COLOR[index] ?? "#1a1815";
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      className="fade-in-up group grid grid-cols-[48px_1fr_160px_80px] items-start gap-6 border-t border-[#1a181522] py-6 transition hover:bg-[#1a181504]"
+      style={{ animationDelay: `${index * 90}ms` }}
+    >
+      <span className="serif text-5xl italic" style={{ color: rankColor }}>
+        {RANK_ROMAN[index]}
+      </span>
+      <div>
+        <p className="serif text-[22px] leading-[1.2] text-[#1a1815]">{issue.title}</p>
+        <p className="mt-2 max-w-2xl text-[13.5px] leading-6 text-[#3a342d]">{issue.why}</p>
+        {issue.acceptance_criteria.length > 0 ? (
+          <p className="mono mt-2 text-[11px] leading-5 text-[#7a7264]">
+            acceptance · {issue.acceptance_criteria[0]}
+          </p>
+        ) : null}
+      </div>
+      <span
+        className="justify-self-start rounded-full border px-3 py-1 text-[11px] font-semibold"
+        style={{ color: rankColor, borderColor: rankColor, backgroundColor: `${rankColor}0f` }}
+      >
+        {issue.priority} · {RANK_LABEL[issue.priority]}
+      </span>
+      <span className="mono justify-self-end text-[12px] text-[#7a7264] transition group-hover:text-[#c65a2e]">
+        #{number} →
+      </span>
+    </a>
+  );
+}
+
+function Composer({
+  problem,
+  setProblem,
+  onSubmit,
+  isSubmitting,
+  error
+}: {
+  problem: string;
+  setProblem: (v: string) => void;
+  onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
+  isSubmitting: boolean;
+  error: string | null;
+}) {
+  return (
+    <form
+      onSubmit={onSubmit}
+      className="fixed inset-x-0 bottom-0 z-30 border-t border-[#1a181533] bg-[#faf7f0]/95 backdrop-blur-md"
+    >
+      <div className="mx-auto flex max-w-4xl items-center gap-3 px-6 py-4">
+        <span className="mono hidden text-[11px] uppercase tracking-[0.25em] text-[#7a7264] sm:block">
+          Drop today's problem →
+        </span>
+        <div className="flex-1 rounded-2xl border border-[#1a18153d] bg-white focus-within:border-[#c65a2e]">
+          <textarea
+            rows={1}
+            value={problem}
+            onChange={(e) => setProblem(e.target.value)}
+            disabled={isSubmitting}
+            required
+            placeholder="One product problem. Ana, Juno, and Rex take it from there."
+            className="block w-full resize-none bg-transparent px-4 py-3 text-sm text-[#1a1815] outline-none placeholder:text-[#b4a99a] disabled:opacity-60"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                (e.currentTarget.form as HTMLFormElement)?.requestSubmit();
+              }
+            }}
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          className="inline-flex h-11 shrink-0 items-center justify-center rounded-xl bg-[#c65a2e] px-5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isSubmitting ? "Convening…" : "Convene the team →"}
+        </button>
+      </div>
+      {error ? (
+        <p className="mx-auto max-w-4xl px-6 pb-3 text-[11px] text-[#c65a2e]">{error}</p>
+      ) : null}
+    </form>
   );
 }

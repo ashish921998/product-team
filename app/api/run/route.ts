@@ -8,12 +8,12 @@ export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as { product_context?: string; problem?: string };
-    const drafts = await generateIssueDrafts(body.product_context ?? body.problem ?? "");
+    const body = (await request.json()) as { product_md?: string; problem?: string };
+    const drafts = await generateIssueDrafts(body.product_md ?? "", body.problem ?? "");
     const createdIssues = await createGithubIssues(drafts.issues);
 
     return NextResponse.json({
-      researcher_notes: drafts.researcher_notes,
+      user_researcher_notes: drafts.user_researcher_notes,
       pm_notes: drafts.pm_notes,
       issues: drafts.issues,
       created_issues: createdIssues

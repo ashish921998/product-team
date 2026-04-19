@@ -4,8 +4,8 @@ import { generateIssueDrafts } from "@/lib/generate-issues";
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as { product_context?: string; problem?: string };
-    const result = await generateIssueDrafts(body.product_context ?? body.problem ?? "");
+    const body = (await request.json()) as { product_md?: string; problem?: string };
+    const result = await generateIssueDrafts(body.product_md ?? "", body.problem ?? "");
 
     return NextResponse.json(result);
   } catch (error) {
