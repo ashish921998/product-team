@@ -1,0 +1,23 @@
+lib/generate-issues.ts
+  3d0c2295cc627d4c 29,41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "c9a02278256256b975a90bcba518046bdddc1a6e",
+  "prompts": {
+    "3d0c2295cc627d4c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_25b7790aeffe7JSZVTLGDwnM7y",
+        "model": "opencode/gpt-5.4"
+      },
+      "human_author": "Ashish Huddar",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
