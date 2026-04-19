@@ -26,7 +26,7 @@ const pmIssueDraftSchema = z.object({
   title: z.string().min(1),
   why: z.string().min(1),
   acceptance_criteria: z.array(z.string().min(1)).min(1),
-  priority_hint: z.enum(["P1", "P2", "P3"])
+  priority_hint: z.string().min(1)
 });
 
 const pmOutputSchema = z.object({
@@ -38,7 +38,7 @@ const finalIssueSchema = z.object({
   title: z.string().min(1),
   why: z.string().min(1),
   acceptance_criteria: z.array(z.string().min(1)).min(1),
-  priority: z.enum(["P1", "P2", "P3"]),
+  priority: z.string().min(1),
   ice_score: z.number().min(1).max(10),
   success_metric: z.string().min(1),
   event_to_instrument: eventSpecSchema,
