@@ -1,0 +1,40 @@
+lib/github-issues.ts
+  3d0c2295cc627d4c 18-24,41-96
+components/run-form.tsx
+  402fd00f413b65ba 16-49,226,242,248-254,326-333,346-355,361-364,369,382-409,433,436-442,444-449,454-456
+lib/generate-issues.ts
+  3d0c2295cc627d4c 4,53-75,89-101,109-111,116,123-126,136,143-145,160,166-167,178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "f0dd2597d012af9e3271f569f8a2647210d3f8d2",
+  "prompts": {
+    "3d0c2295cc627d4c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_25b7790aeffe7JSZVTLGDwnM7y",
+        "model": "opencode/gpt-5.4"
+      },
+      "human_author": "Ashish Huddar",
+      "messages": [],
+      "total_additions": 119,
+      "total_deletions": 4,
+      "accepted_lines": 120,
+      "overriden_lines": 0
+    },
+    "402fd00f413b65ba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8c715c33-3b8f-4c2c-a860-2fa8f9123e6c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Ashish Huddar",
+      "messages": [],
+      "total_additions": 128,
+      "total_deletions": 23,
+      "accepted_lines": 124,
+      "overriden_lines": 0
+    }
+  }
+}
