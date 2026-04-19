@@ -15,6 +15,13 @@ const issueDraftSchema = z.object({
 
 const createIssuesInputSchema = z.tuple([issueDraftSchema, issueDraftSchema, issueDraftSchema]);
 
+type RepoContext = {
+  owner: string;
+  repo: string;
+  readme: string | null;
+  recent_issue_titles: string[];
+};
+
 function getOctokit() {
   const auth = process.env.GITHUB_TOKEN;
 
@@ -28,6 +35,65 @@ function getOctokit() {
 function getRequestHeaders() {
   return {
     "X-GitHub-Api-Version": "2022-11-28"
+  };
+}
+
+function decodeBase64Utf8(content: string) {
+  return Buffer.from(content, "base64").toString("utf8");
+}
+
+function summarizeReadme(readme: string) {
+  return readme
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
+    .replace(/\r/g, "")
+    .trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 12)
+    .join("\n")
+    .slice(0, 1800);
+}
+
+export async function getGithubRepoContext(): Promise<RepoContext> {
+  const octokit = getOctokit();
+
+  const [readmeResponse, issuesResponse] = await Promise.all([
+    octokit.rest.repos
+      .getReadme({
+        owner: GITHUB_OWNER,
+        repo: GITHUB_REPO,
+        headers: getRequestHeaders()
+      })
+      .catch(() => null),
+    octokit.rest.issues.listForRepo({
+      owner: GITHUB_OWNER,
+      repo: GITHUB_REPO,
+      state: "open",
+      sort: "updated",
+      per_page: 10,
+      headers: getRequestHeaders()
+    })
+  ]);
+
+  const readme =
+    readmeResponse?.data.content && readmeResponse.data.encoding === "base64"
+      ? summarizeReadme(decodeBase64Utf8(readmeResponse.data.content))
+      : null;
+
+  const recentIssueTitles = issuesResponse.data
+    .filter((issue) => !issue.pull_request)
+    .map((issue) => issue.title)
+    .slice(0, 8);
+
+  return {
+    owner: GITHUB_OWNER,
+    repo: GITHUB_REPO,
+    readme,
+    recent_issue_titles: recentIssueTitles
   };
 }
 

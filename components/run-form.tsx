@@ -13,10 +13,40 @@ const EXAMPLE_INPUTS = [
 type AgentState = "idle" | "active" | "done";
 type AgentKey = "researcher" | "pm" | "head";
 
-const AGENTS: { key: AgentKey; name: string; model: string; task: string }[] = [
-  { key: "researcher", name: "Researcher", model: "Claude Haiku", task: "Maps user pain & root causes" },
-  { key: "pm", name: "PM", model: "Claude Haiku", task: "Drafts 3 scoped issue candidates" },
-  { key: "head", name: "Head of Product", model: "Claude Sonnet", task: "Ranks & returns final JSON" }
+const AGENTS: {
+  key: AgentKey;
+  name: string;
+  model: string;
+  task: string;
+  icon: "search" | "clipboard" | "crown";
+}[] = [
+  {
+    key: "researcher",
+    name: "Researcher",
+    model: "Claude Haiku",
+    task: "Maps user pain & root causes",
+    icon: "search"
+  },
+  {
+    key: "pm",
+    name: "PM",
+    model: "Claude Haiku",
+    task: "Drafts 3 scoped issue candidates",
+    icon: "clipboard"
+  },
+  {
+    key: "head",
+    name: "Head of Product",
+    model: "Claude Sonnet",
+    task: "Ranks & returns final JSON",
+    icon: "crown"
+  }
+];
+
+const RANK_META = [
+  { rank: 1, priority: "P1", label: "Highest priority" },
+  { rank: 2, priority: "P2", label: "Next up" },
+  { rank: 3, priority: "P3", label: "Nice to have" }
 ];
 
 const PRIORITY_STYLES: Record<string, string> = {
@@ -193,6 +223,7 @@ function Pipeline(props: {
             name={agent.name}
             model={agent.model}
             task={agent.task}
+            icon={agent.icon}
             state={state}
             connectorActive={nextActive}
           />
@@ -208,12 +239,19 @@ function AgentWithFlow(props: {
   name: string;
   model: string;
   task: string;
+  icon: "search" | "clipboard" | "crown";
   state: AgentState;
   connectorActive: boolean;
 }) {
   return (
     <>
-      <AgentNode name={props.name} model={props.model} task={props.task} state={props.state} />
+      <AgentNode
+        name={props.name}
+        model={props.model}
+        task={props.task}
+        icon={props.icon}
+        state={props.state}
+      />
       <FlowConnector active={props.connectorActive} />
     </>
   );
@@ -285,8 +323,14 @@ function ProblemNode(props: {
   );
 }
 
-function AgentNode(props: { name: string; model: string; task: string; state: AgentState }) {
-  const { name, model, task, state } = props;
+function AgentNode(props: {
+  name: string;
+  model: string;
+  task: string;
+  icon: "search" | "clipboard" | "crown";
+  state: AgentState;
+}) {
+  const { name, model, task, icon, state } = props;
 
   const border =
     state === "active"
@@ -299,18 +343,30 @@ function AgentNode(props: { name: string; model: string; task: string; state: Ag
     state === "active" ? "bg-cyan-300" : state === "done" ? "bg-emerald-400" : "bg-white/20";
   const dotPulse = state === "active" ? "pulse-dot" : "";
 
+  const iconTint =
+    state === "active" ? "text-cyan-300" : state === "done" ? "text-emerald-300" : "text-white/40";
+
+  const iconBg =
+    state === "active"
+      ? "border-cyan-300/40 bg-cyan-300/10"
+      : state === "done"
+      ? "border-emerald-300/30 bg-emerald-300/10"
+      : "border-white/10 bg-white/[0.03]";
+
   return (
     <div
       className={`flex flex-col rounded-3xl border ${border} bg-[#0e141c] p-5 transition-all duration-500`}
     >
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.28em] text-white/50">
-          Agent
+        <span
+          className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border ${iconBg} ${iconTint} transition-colors duration-500`}
+        >
+          <AgentIcon kind={icon} />
         </span>
         <span className={`h-2 w-2 rounded-full ${dotColor} ${dotPulse}`} />
       </div>
 
-      <p className="mt-3 text-lg font-semibold text-white">{name}</p>
+      <p className="mt-4 text-lg font-semibold text-white">{name}</p>
       <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-cyan-300/70">
         {model}
       </p>
@@ -320,6 +376,34 @@ function AgentNode(props: { name: string; model: string; task: string; state: Ag
         <StatusPill state={state} />
       </div>
     </div>
+  );
+}
+
+function AgentIcon({ kind }: { kind: "search" | "clipboard" | "crown" }) {
+  const stroke = "currentColor";
+  const common = { fill: "none", stroke, strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round" } as const;
+  if (kind === "search") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" {...common}>
+        <circle cx="11" cy="11" r="6" />
+        <path d="m20 20-4.3-4.3" />
+      </svg>
+    );
+  }
+  if (kind === "clipboard") {
+    return (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" {...common}>
+        <rect x="5" y="5" width="14" height="16" rx="2" />
+        <path d="M9 5V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1" />
+        <path d="M8.5 11h7M8.5 14.5h7M8.5 18h4" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" {...common}>
+      <path d="M3 8l4 4 5-7 5 7 4-4-2 11H5L3 8z" />
+      <path d="M7 20h10" />
+    </svg>
   );
 }
 
@@ -346,22 +430,30 @@ function StatusPill({ state }: { state: AgentState }) {
 }
 
 function FlowConnector({ active }: { active: boolean }) {
+  const gradId = active ? "flow-grad-active" : "flow-grad-idle";
   return (
     <div className="flex items-center justify-center">
-      <svg viewBox="0 0 40 24" className="h-6 w-10 rotate-90 xl:rotate-0">
+      <svg viewBox="0 0 48 28" className="h-8 w-12 rotate-90 xl:rotate-0">
+        <defs>
+          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor={active ? "#22d3ee" : "rgba(255,255,255,0.25)"} stopOpacity={active ? "0.3" : "1"} />
+            <stop offset="100%" stopColor={active ? "#22d3ee" : "rgba(255,255,255,0.25)"} stopOpacity="1" />
+          </linearGradient>
+        </defs>
         <line
-          x1="0"
-          y1="12"
-          x2="36"
-          y2="12"
-          stroke={active ? "#22d3ee" : "rgba(255,255,255,0.18)"}
-          strokeWidth="2"
+          x1="2"
+          y1="14"
+          x2="38"
+          y2="14"
+          stroke={`url(#${gradId})`}
+          strokeWidth={active ? "3" : "2"}
           strokeLinecap="round"
           className={active ? "flow-line" : ""}
         />
         <polygon
-          points="34,6 40,12 34,18"
-          fill={active ? "#22d3ee" : "rgba(255,255,255,0.18)"}
+          points="36,6 46,14 36,22"
+          fill={active ? "#22d3ee" : "rgba(255,255,255,0.35)"}
+          className={active ? "drop-shadow-[0_0_6px_rgba(34,211,238,0.8)]" : ""}
         />
       </svg>
     </div>

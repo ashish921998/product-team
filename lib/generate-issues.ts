@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 
+import { getGithubRepoContext } from "@/lib/github-issues";
 import type { RankedIssueDrafts } from "@/lib/types";
 
 const issueSchema = z.object({
@@ -49,6 +50,29 @@ function extractJsonObject(raw: string) {
   return raw.slice(start, end + 1);
 }
 
+async function repairJsonOutput(raw: string) {
+  return runAgent(
+    PM_MODEL,
+    [
+      "You repair malformed JSON.",
+      "Return valid JSON only.",
+      "Preserve the meaning of the input.",
+      "Use this exact schema:",
+      '{"researcher_notes":"string","pm_notes":"string","issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"}]}'
+    ].join(" "),
+    raw
+  );
+}
+
+async function parseRankedIssues(raw: string) {
+  try {
+    return rankedIssuesSchema.parse(JSON.parse(extractJsonObject(raw)));
+  } catch {
+    const repaired = await repairJsonOutput(raw);
+    return rankedIssuesSchema.parse(JSON.parse(extractJsonObject(repaired)));
+  }
+}
+
 async function runAgent(model: string, system: string, prompt: string) {
   const client = getClient();
   const response = await client.messages.create({
@@ -62,6 +86,19 @@ async function runAgent(model: string, system: string, prompt: string) {
   return getTextContent(response);
 }
 
+function formatRepoContext(context: Awaited<ReturnType<typeof getGithubRepoContext>>) {
+  return [
+    `Target repo: ${context.owner}/${context.repo}`,
+    context.readme ? "README summary:" : "README summary: unavailable",
+    context.readme ?? "",
+    "",
+    context.recent_issue_titles.length > 0 ? "Recent open issue titles:" : "Recent open issue titles: none",
+    ...context.recent_issue_titles.map((title) => `- ${title}`)
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export async function generateIssueDrafts(productContext: string): Promise<RankedIssueDrafts> {
   const normalizedProductContext = productContext.trim();
 
@@ -69,18 +106,24 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
     throw new Error("Product brief and problem are required");
   }
 
+  const repoContext = await getGithubRepoContext();
+  const formattedRepoContext = formatRepoContext(repoContext);
+
   const researcherNotes = await runAgent(
     RESEARCHER_MODEL,
     "You are Researcher. Work only on the product brief and problem provided. Do not propose solutions yet.",
     [
-      "Analyze the product brief and product problem below.",
+      "Analyze the repo context, product brief, and product problem below.",
       "Return three sections exactly:",
       "1. Core user pain",
       "2. Likely root causes",
       "3. Risks if we solve the wrong thing",
       "Keep it concise and practical.",
       "",
-      "Use the product brief as context for your reasoning.",
+      "Use the repo context to stay grounded in what the product already is.",
+      "Avoid proposing issues that clearly duplicate the recent open issues if possible.",
+      "",
+      formattedRepoContext,
       "",
       normalizedProductContext
     ].join("\n")
@@ -90,13 +133,16 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
     PM_MODEL,
     "You are PM. Turn the research into a tiny backlog. Stay ruthlessly scoped.",
     [
-      "Using the product brief, product problem, and researcher notes below, propose exactly three issue candidates.",
+      "Using the repo context, product brief, product problem, and researcher notes below, propose exactly three issue candidates.",
       "Each candidate should include:",
       "- title",
       "- why",
       "- acceptance_criteria as a short list",
       "- expected priority",
       "Do not write JSON. Plain text is fine.",
+      "Avoid obvious duplicates of recent open issues.",
+      "",
+      formattedRepoContext,
       "",
       normalizedProductContext,
       "",
@@ -111,11 +157,14 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
       "You are Head of Product.",
       "Return valid JSON only.",
       "Pick the best three issue drafts, rank them from highest priority to lowest priority, and keep them demoable.",
+      "Use the repo context to prefer issues that fit the current product and avoid obvious duplicates of recent open issues.",
       "Use this exact schema:",
       '{"researcher_notes":"string","pm_notes":"string","issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1|P2|P3"}]}',
       "Do not include markdown fences. Do not return more than three issues."
     ].join(" "),
     [
+      formattedRepoContext,
+      "",
       normalizedProductContext,
       "",
       "Researcher notes:",
@@ -126,7 +175,7 @@ export async function generateIssueDrafts(productContext: string): Promise<Ranke
     ].join("\n")
   );
 
-  const parsed = rankedIssuesSchema.parse(JSON.parse(extractJsonObject(headOfProductOutput)));
+  const parsed = await parseRankedIssues(headOfProductOutput);
 
   return parsed;
 }
