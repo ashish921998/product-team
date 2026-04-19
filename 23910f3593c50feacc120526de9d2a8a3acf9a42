@@ -1,0 +1,23 @@
+components/run-form.tsx
+  3d0c2295cc627d4c 3,18,23-27,51,73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "23910f3593c50feacc120526de9d2a8a3acf9a42",
+  "prompts": {
+    "3d0c2295cc627d4c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_25b7790aeffe7JSZVTLGDwnM7y",
+        "model": "opencode/gpt-5.4"
+      },
+      "human_author": "Ashish Huddar",
+      "messages": [],
+      "total_additions": 9,
+      "total_deletions": 1,
+      "accepted_lines": 9,
+      "overriden_lines": 0
+    }
+  }
+}
