@@ -186,7 +186,7 @@ function generateWireframeSvg(params: {
   const dropOff = escapeXml(truncate(params.research.drop_off_point, 44));
   const problem = escapeXml(truncate(params.problem, 72));
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560" fill="none">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" fill="none" preserveAspectRatio="xMidYMid meet">
   <rect width="900" height="560" rx="24" fill="#F8F4EC"/>
   <rect x="56" y="56" width="788" height="448" rx="20" fill="#FFFDF8" stroke="#D9D1C5"/>
   <text x="88" y="100" fill="#C65A2E" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">LIGHTWEIGHT WIREFRAME</text>

@@ -49,3 +49,10 @@ export type CreatedGithubIssue = {
 export type ProductTeamRunResult = ProductPacket & {
   created_issues: [CreatedGithubIssue, CreatedGithubIssue, CreatedGithubIssue];
 };
+
+export type WaitlistSignup = {
+  name: string;
+  email: string;
+  company?: string;
+  submitted_at: string;
+};
