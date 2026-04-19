@@ -3,9 +3,9 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 export const metadata: Metadata = {
-  title: "ProductTeam.ai — Three teammates. One standup. Three shipped issues.",
+  title: "ProductTeam.ai — Vague product problem in, mini product packet out.",
   description:
-    "An AI product team for the 1-person startup. Ana, Juno, and Rex read your brief and file 3 ranked GitHub issues in your repo."
+    "Turn one vague product problem into a compact product packet with a mini PRD, one wireframe, a tiny analytics plan, a short journey summary, and 3 real GitHub issues."
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
