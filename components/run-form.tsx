@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import type { ProductTeamRunResult } from "@/lib/types";
 
@@ -15,10 +15,16 @@ export function RunForm() {
   const [result, setResult] = useState<ProductTeamRunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submissionInFlightRef = useRef(false);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    if (submissionInFlightRef.current) {
+      return;
+    }
+
+    submissionInFlightRef.current = true;
     setIsSubmitting(true);
     setError(null);
 
@@ -42,6 +48,7 @@ export function RunForm() {
       setResult(null);
       setError(submissionError instanceof Error ? submissionError.message : "Run failed");
     } finally {
+      submissionInFlightRef.current = false;
       setIsSubmitting(false);
     }
   }
@@ -63,6 +70,7 @@ export function RunForm() {
             <textarea
               value={problem}
               onChange={(event) => setProblem(event.target.value)}
+              disabled={isSubmitting}
               className="h-48 w-full resize-none rounded-2xl border border-white/10 bg-black/30 px-5 py-4 text-base leading-7 text-white outline-none transition focus:border-cyan-300/60"
               placeholder="Users sign up but never return after day 3"
               required
