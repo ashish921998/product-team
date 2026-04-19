@@ -1,0 +1,54 @@
+.env.example
+  de44af64d7b5331d 7-9
+app/api/run/route.ts
+  a6eed0cc9f497518 16
+package.json
+  a6eed0cc9f497518 13
+.claude/settings.local.json
+  de44af64d7b5331d 10-11
+lib/generate-issues.ts
+  a6eed0cc9f497518 2,8-24,71,77-117,147-157,159-166,175-185,188,198-200,210-211,213-214,217-219,221-225,313-323,329-330,347-349,351,353-360,365-366,388-390,392,394-402,408-409,447-449,451,453-462,468-469,512-514,516,518-593,596-601,604-610,613-620,623-626,628-668,672,674-676,678-684,687-694,697-705,708-717,720-721,723-726,736-746
+  de44af64d7b5331d 594-595,602-603,611-612,621-622,627,669-671,673,677,685-686,695-696,706-707,718-719,722,735,754-770
+lib/types.ts
+  a6eed0cc9f497518 8-21,48
+components/run-form.tsx
+  a6eed0cc9f497518 6,14,22-26,76,84,88,96,356,480-486,696-735
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "b47729e84169406c3abd467acb0eaa407c3e5eb8",
+  "prompts": {
+    "a6eed0cc9f497518": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_25ad1bb85ffefABzv55rbentHF",
+        "model": "opencode/claude-opus-4-6"
+      },
+      "human_author": "Ashish Huddar",
+      "messages": [],
+      "total_additions": 455,
+      "total_deletions": 43,
+      "accepted_lines": 440,
+      "overriden_lines": 0
+    },
+    "de44af64d7b5331d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f4022cb9-d249-48f3-8297-aff67386c4e1",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Ashish Huddar",
+      "messages": [],
+      "total_additions": 49,
+      "total_deletions": 13,
+      "accepted_lines": 47,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_e1aac9baf373c4": {
+      "author": "Ashish Huddar"
+    }
+  }
+}
