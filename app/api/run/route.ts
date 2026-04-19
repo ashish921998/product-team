@@ -13,6 +13,7 @@ export async function POST(request: Request) {
     const createdIssues = await createGithubIssues(drafts.issues);
 
     return NextResponse.json({
+      execution_plan: drafts.execution_plan,
       prd_markdown: drafts.prd_markdown,
       user_research: drafts.user_research,
       analytics_spec: drafts.analytics_spec,

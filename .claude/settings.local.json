@@ -7,7 +7,8 @@
       "Bash(curl -s http://localhost:3002/_next/static/css/)",
       "Bash(curl -s http://localhost:3002)",
       "Bash(curl -s \"http://localhost:3002/_next/static/css/app/layout.css?v=1776586183598\")",
-      "Bash(curl -s -o /dev/null -w \"CSS_BYTES: %{size_download}\\\\n\" \"http://localhost:3002/_next/static/css/app/layout.css?v=1776586183598\")"
+      "Bash(curl -s -o /dev/null -w \"CSS_BYTES: %{size_download}\\\\n\" \"http://localhost:3002/_next/static/css/app/layout.css?v=1776586183598\")",
+      "Bash(awk 'NR>=535 && NR<=537 {print NR\": \"$0} NR==754 {print NR\": \"$0}' /Users/ashishhuddar/product-team/lib/generate-issues.ts)"
     ]
   }
 }

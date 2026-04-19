@@ -1,8 +1,26 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { Langfuse } from "langfuse-node";
 import { z } from "zod";
 
 import { getGithubRepoContext } from "@/lib/github-issues";
 import type { ProductPacket, UserResearchSummary } from "@/lib/types";
+
+// ---------------------------------------------------------------------------
+// Langfuse observability
+// ---------------------------------------------------------------------------
+
+function getLangfuse() {
+  const publicKey = process.env.LANGFUSE_PUBLIC_KEY;
+  const secretKey = process.env.LANGFUSE_SECRET_KEY;
+
+  if (!publicKey || !secretKey) return null;
+
+  return new Langfuse({
+    publicKey,
+    secretKey,
+    baseUrl: process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com"
+  });
+}
 
 const eventSpecSchema = z.object({
   name: z.string().min(1),
@@ -50,10 +68,52 @@ const headOfProductSchema = z.object({
   issues: z.tuple([finalIssueSchema, finalIssueSchema, finalIssueSchema])
 });
 
+const MANAGER_MODEL = "claude-sonnet-4-5";
 const RESEARCHER_MODEL = "claude-haiku-4-5";
 const ANALYST_MODEL = "claude-haiku-4-5";
 const PM_MODEL = "claude-haiku-4-5";
 const HEAD_OF_PRODUCT_MODEL = "claude-sonnet-4-5";
+
+// ---------------------------------------------------------------------------
+// Manager Agent: Plans execution dynamically based on the problem
+// ---------------------------------------------------------------------------
+
+type AgentId = "researcher" | "analyst" | "pm" | "head_of_product" | "designer";
+
+type AgentTask = {
+  agent: AgentId;
+  focus: string;
+  priority: "critical" | "standard" | "optional";
+};
+
+type ExecutionPlan = {
+  problem_type: string;
+  reasoning: string;
+  agent_sequence: AgentTask[];
+  review_pass: boolean;
+  review_focus: string;
+};
+
+const executionPlanSchema = z.object({
+  problem_type: z.string().min(1),
+  reasoning: z.string().min(1),
+  agent_sequence: z.array(
+    z.object({
+      agent: z.enum(["researcher", "analyst", "pm", "head_of_product", "designer"]),
+      focus: z.string().min(1),
+      priority: z.enum(["critical", "standard", "optional"])
+    })
+  ).min(3),
+  review_pass: z.boolean(),
+  review_focus: z.string().min(1)
+});
+
+const reviewVerdictSchema = z.object({
+  approved: z.boolean(),
+  issues_found: z.array(z.string()),
+  rerun_agents: z.array(z.enum(["researcher", "analyst", "pm", "head_of_product"])),
+  summary: z.string().min(1)
+});
 
 function getClient() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -84,8 +144,26 @@ function extractJsonObject(raw: string) {
   return raw.slice(start, end + 1);
 }
 
-async function runAgent(model: string, system: string, prompt: string, maxTokens = 1400) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type LangfuseParent = { generation: (...args: any[]) => any; span: (...args: any[]) => any } | null;
+
+async function runAgent(
+  model: string,
+  system: string,
+  prompt: string,
+  maxTokens = 1400,
+  tracingParent: LangfuseParent = null,
+  generationName?: string
+) {
   const client = getClient();
+
+  const gen = tracingParent?.generation({
+    name: generationName ?? `llm-${model}`,
+    model,
+    input: { system, prompt: prompt.slice(0, 500) },
+    modelParameters: { maxTokens, temperature: 0.2 }
+  });
+
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
@@ -94,10 +172,20 @@ async function runAgent(model: string, system: string, prompt: string, maxTokens
     messages: [{ role: "user", content: prompt }]
   });
 
-  return getTextContent(response);
+  const output = getTextContent(response);
+
+  gen?.end({
+    output: output.slice(0, 500),
+    usage: {
+      input: response.usage?.input_tokens,
+      output: response.usage?.output_tokens
+    }
+  });
+
+  return output;
 }
 
-async function repairJsonOutput(raw: string, schemaHint: string) {
+async function repairJsonOutput(raw: string, schemaHint: string, tracingParent: LangfuseParent = null) {
   return runAgent(
     PM_MODEL,
     [
@@ -107,7 +195,9 @@ async function repairJsonOutput(raw: string, schemaHint: string) {
       `Use this exact schema: ${schemaHint}`
     ].join(" "),
     raw,
-    1400
+    1400,
+    tracingParent,
+    "json-repair"
   );
 }
 
@@ -117,14 +207,22 @@ async function runStructuredAgent<T>(params: {
   prompt: string;
   schema: z.ZodType<T>;
   schemaHint: string;
+  tracingParent?: LangfuseParent;
+  agentName?: string;
 }) {
-  const raw = await runAgent(params.model, params.system, params.prompt);
+  const span = params.tracingParent?.span({ name: params.agentName ?? "structured-agent" });
+  const raw = await runAgent(params.model, params.system, params.prompt, 1400, span ?? params.tracingParent, params.agentName);
 
   try {
-    return params.schema.parse(JSON.parse(extractJsonObject(raw)));
+    const parsed = params.schema.parse(JSON.parse(extractJsonObject(raw)));
+    span?.end({ output: JSON.stringify(parsed).slice(0, 500) });
+    return parsed;
   } catch {
-    const repaired = await repairJsonOutput(raw, params.schemaHint);
-    return params.schema.parse(JSON.parse(extractJsonObject(repaired)));
+    span?.event({ name: "json-parse-failed", input: { raw: raw.slice(0, 300) } });
+    const repaired = await repairJsonOutput(raw, params.schemaHint, span ?? params.tracingParent);
+    const parsed = params.schema.parse(JSON.parse(extractJsonObject(repaired)));
+    span?.end({ output: JSON.stringify(parsed).slice(0, 500) });
+    return parsed;
   }
 }
 
@@ -212,24 +310,24 @@ function generateWireframeSvg(params: {
 </svg>`;
 }
 
-export async function generateIssueDrafts(problem: string): Promise<ProductPacket> {
-  const normalizedProblem = problem.trim();
+// ---------------------------------------------------------------------------
+// Specialist runner helpers — each returns structured output
+// ---------------------------------------------------------------------------
 
-  if (!normalizedProblem) {
-    throw new Error("Problem is required");
-  }
-
-  const repoContext = await getGithubRepoContext();
-  const formattedRepoContext = formatRepoContext(repoContext);
-  const formattedProblemContext = formatProblemContext(normalizedProblem);
-
-  const userResearch = await runStructuredAgent({
+async function runResearcher(
+  formattedRepoContext: string,
+  formattedProblemContext: string,
+  focus: string,
+  tracingParent: LangfuseParent = null
+) {
+  return runStructuredAgent({
     model: RESEARCHER_MODEL,
     system: [
       "You are User Researcher.",
       "Return valid JSON only.",
       "Do not propose solutions.",
-      "Make every field short and concrete."
+      "Make every field short and concrete.",
+      `Manager focus directive: ${focus}`
     ].join(" "),
     prompt: [
       "Analyze the vague product problem using the repo context.",
@@ -246,15 +344,26 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     ].join("\n"),
     schema: userResearchSchema,
     schemaHint:
-      '{"persona":"string","pain_point":"string","drop_off_point":"string","hypotheses":["string","string","string"]}'
+      '{"persona":"string","pain_point":"string","drop_off_point":"string","hypotheses":["string","string","string"]}',
+    tracingParent,
+    agentName: "researcher"
   });
+}
 
-  const analyticsSpec = await runStructuredAgent({
+async function runAnalyst(
+  formattedRepoContext: string,
+  formattedProblemContext: string,
+  userResearch: z.infer<typeof userResearchSchema>,
+  focus: string,
+  tracingParent: LangfuseParent = null
+) {
+  return runStructuredAgent({
     model: ANALYST_MODEL,
     system: [
       "You are Data Analyst.",
       "Return valid JSON only.",
-      "Keep the analytics spec toy-sized and practical."
+      "Keep the analytics spec toy-sized and practical.",
+      `Manager focus directive: ${focus}`
     ].join(" "),
     prompt: [
       "Return only these keys:",
@@ -276,16 +385,28 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     ].join("\n"),
     schema: analyticsSpecSchema,
     schemaHint:
-      '{"success_metric":"string","guardrail_metric":"string optional","event_specs":[{"name":"string","properties":["string","string"]},{"name":"string","properties":["string","string"]},{"name":"string","properties":["string","string"]}]}'
+      '{"success_metric":"string","guardrail_metric":"string optional","event_specs":[{"name":"string","properties":["string","string"]},{"name":"string","properties":["string","string"]},{"name":"string","properties":["string","string"]}]}',
+    tracingParent,
+    agentName: "analyst"
   });
+}
 
-  const pmOutput = await runStructuredAgent({
+async function runPm(
+  formattedRepoContext: string,
+  formattedProblemContext: string,
+  userResearch: z.infer<typeof userResearchSchema>,
+  analyticsSpec: z.infer<typeof analyticsSpecSchema>,
+  focus: string,
+  tracingParent: LangfuseParent = null
+) {
+  return runStructuredAgent({
     model: PM_MODEL,
     system: [
       "You are PM.",
       "Return valid JSON only.",
       "Build a mini PRD markdown block and exactly 3 issue drafts.",
-      "Make every artifact smaller than you want."
+      "Make every artifact smaller than you want.",
+      `Manager focus directive: ${focus}`
     ].join(" "),
     prompt: [
       "Generate:",
@@ -323,16 +444,29 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
       .join("\n"),
     schema: pmOutputSchema,
     schemaHint:
-      '{"prd_markdown":"string","issue_drafts":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P1"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P2"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P3"}]}'
+      '{"prd_markdown":"string","issue_drafts":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P1"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P2"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P3"}]}',
+    tracingParent,
+    agentName: "pm"
   });
+}
 
-  const headOfProduct = await runStructuredAgent({
+async function runHeadOfProduct(
+  formattedRepoContext: string,
+  formattedProblemContext: string,
+  userResearch: z.infer<typeof userResearchSchema>,
+  analyticsSpec: z.infer<typeof analyticsSpecSchema>,
+  pmOutput: z.infer<typeof pmOutputSchema>,
+  focus: string,
+  tracingParent: LangfuseParent = null
+) {
+  return runStructuredAgent({
     model: HEAD_OF_PRODUCT_MODEL,
     system: [
       "You are Head of Product.",
       "Return valid JSON only.",
       "Prioritize exactly 3 issues using ICE only.",
-      "Normalize the final issue schema for GitHub-ready output."
+      "Normalize the final issue schema for GitHub-ready output.",
+      `Manager focus directive: ${focus}`
     ].join(" "),
     prompt: [
       "Take the PM output and prepare final GitHub-ready issues.",
@@ -375,9 +509,221 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
       .join("\n"),
     schema: headOfProductSchema,
     schemaHint:
-      '{"issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1","ice_score":8.1,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P2","ice_score":7.4,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P3","ice_score":6.8,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"}]}'
+      '{"issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1","ice_score":8.1,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P2","ice_score":7.4,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P3","ice_score":6.8,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"}]}',
+    tracingParent,
+    agentName: "head-of-product"
   });
+}
 
+// ---------------------------------------------------------------------------
+// Manager-driven orchestration pipeline
+// ---------------------------------------------------------------------------
+
+export async function generateIssueDrafts(problem: string): Promise<ProductPacket> {
+  const normalizedProblem = problem.trim();
+
+  if (!normalizedProblem) {
+    throw new Error("Problem is required");
+  }
+
+  // ── Langfuse trace for the full pipeline run ────────────────────────
+  const langfuse = getLangfuse();
+  const trace = langfuse?.trace({
+    name: "product-packet-pipeline",
+    input: { problem: normalizedProblem },
+    metadata: { version: "2.0-manager" }
+  }) ?? null;
+
+  try {
+  const repoContext = await getGithubRepoContext();
+  const formattedRepoContext = formatRepoContext(repoContext);
+  const formattedProblemContext = formatProblemContext(normalizedProblem);
+
+  // ── Step 1: Manager Agent creates a dynamic execution plan ──────────
+  const managerSpan = trace?.span({ name: "manager-planning" }) ?? null;
+  const plan = await runStructuredAgent<ExecutionPlan>({
+    model: MANAGER_MODEL,
+    system: [
+      "You are the Manager Agent — the orchestrator of a product planning team.",
+      "Return valid JSON only.",
+      "Your job is to analyze the incoming product problem and create a tailored execution plan.",
+      "You decide which specialist agents to invoke, what each should focus on, their order, and whether a review pass is needed.",
+      "Available agents: researcher, analyst, pm, head_of_product, designer.",
+      "The designer is always last and always included.",
+      "You MUST always include researcher, analyst, pm, and head_of_product — but you control their focus directives.",
+      "For retention/churn problems, tell the researcher to focus on churn signals and the analyst to track cohort metrics.",
+      "For growth/acquisition problems, tell the researcher to focus on activation barriers and the analyst to track funnel conversion.",
+      "For usability/UX problems, tell the researcher to focus on task completion failures and the analyst to track error rates.",
+      "For monetization problems, tell the researcher to focus on willingness-to-pay signals and the analyst to track revenue events.",
+      "Set review_pass to true when the problem is ambiguous, multi-faceted, or high-stakes.",
+      "Set review_pass to false for straightforward, well-scoped problems.",
+      "Keep reasoning concise (1-2 sentences)."
+    ].join(" "),
+    prompt: [
+      "Analyze this product problem and create an execution plan for the specialist team.",
+      "",
+      formattedRepoContext,
+      "",
+      formattedProblemContext,
+      "",
+      "Return JSON with these keys:",
+      '- "problem_type": category like "retention", "growth", "usability", "monetization", "engagement", "onboarding"',
+      '- "reasoning": why you chose this plan (1-2 sentences)',
+      '- "agent_sequence": array of {agent, focus, priority} objects',
+      '- "review_pass": boolean — should the manager review the final output?',
+      '- "review_focus": what should the review check for?'
+    ].join("\n"),
+    schema: executionPlanSchema,
+    schemaHint:
+      '{"problem_type":"retention","reasoning":"string","agent_sequence":[{"agent":"researcher","focus":"string","priority":"critical"},{"agent":"analyst","focus":"string","priority":"critical"},{"agent":"pm","focus":"string","priority":"critical"},{"agent":"head_of_product","focus":"string","priority":"standard"},{"agent":"designer","focus":"string","priority":"standard"}],"review_pass":true,"review_focus":"string"}',
+    tracingParent: managerSpan,
+    agentName: "manager-plan"
+  });
+  managerSpan?.end({ output: JSON.stringify(plan).slice(0, 500) });
+
+  // Build a focus lookup from the plan
+  const focusMap = new Map<AgentId, string>();
+  for (const task of plan.agent_sequence) {
+    focusMap.set(task.agent, task.focus);
+  }
+
+  // ── Step 2: Execute specialists in plan order ───────────────────────
+  let userResearch = await runResearcher(
+    formattedRepoContext,
+    formattedProblemContext,
+    focusMap.get("researcher") ?? "General user research",
+    trace
+  );
+
+  let analyticsSpec = await runAnalyst(
+    formattedRepoContext,
+    formattedProblemContext,
+    userResearch,
+    focusMap.get("analyst") ?? "General analytics",
+    trace
+  );
+
+  let pmOutput = await runPm(
+    formattedRepoContext,
+    formattedProblemContext,
+    userResearch,
+    analyticsSpec,
+    focusMap.get("pm") ?? "General PM output",
+    trace
+  );
+
+  let headOfProduct = await runHeadOfProduct(
+    formattedRepoContext,
+    formattedProblemContext,
+    userResearch,
+    analyticsSpec,
+    pmOutput,
+    focusMap.get("head_of_product") ?? "General prioritization",
+    trace
+  );
+
+  // ── Step 3: Manager review pass (if plan requires it) ───────────────
+  if (plan.review_pass) {
+    const reviewSpan = trace?.span({ name: "manager-review" }) ?? null;
+    const review = await runStructuredAgent({
+      model: MANAGER_MODEL,
+      system: [
+        "You are the Manager Agent reviewing the specialist outputs.",
+        "Return valid JSON only.",
+        "Check if the outputs are coherent, address the original problem, and meet quality standards.",
+        `Review focus: ${plan.review_focus}`,
+        "If issues are minor, approve and note them. Only request reruns for critical gaps.",
+        "rerun_agents should be an empty array if approved."
+      ].join(" "),
+      prompt: [
+        "Review the specialist outputs for this problem:",
+        "",
+        formattedProblemContext,
+        "",
+        `Problem type identified: ${plan.problem_type}`,
+        `Plan reasoning: ${plan.reasoning}`,
+        "",
+        "User Research output:",
+        JSON.stringify(userResearch, null, 2),
+        "",
+        "Analytics Spec output:",
+        JSON.stringify(analyticsSpec, null, 2),
+        "",
+        "PM PRD:",
+        pmOutput.prd_markdown,
+        "",
+        "PM Issue Drafts:",
+        JSON.stringify(pmOutput.issue_drafts, null, 2),
+        "",
+        "Head of Product final issues:",
+        JSON.stringify(headOfProduct.issues, null, 2),
+        "",
+        "Return JSON with:",
+        '- "approved": boolean',
+        '- "issues_found": array of strings describing problems',
+        '- "rerun_agents": array of agent names that need to rerun (empty if approved)',
+        '- "summary": brief review summary'
+      ].join("\n"),
+      schema: reviewVerdictSchema,
+      schemaHint:
+        '{"approved":true,"issues_found":[],"rerun_agents":[],"summary":"string"}',
+      tracingParent: reviewSpan,
+      agentName: "manager-review"
+    });
+    reviewSpan?.end({ output: JSON.stringify(review).slice(0, 500) });
+
+    // ── Step 4: Re-run flagged agents if needed (one retry max) ────────
+    if (!review.approved && review.rerun_agents.length > 0) {
+      const rerunSpan = trace?.span({ name: "rerun" }) ?? null;
+      const rerunSet = new Set(review.rerun_agents);
+      const rerunContext = `MANAGER FEEDBACK: ${review.issues_found.join("; ")}. Fix these issues.`;
+
+      if (rerunSet.has("researcher")) {
+        userResearch = await runResearcher(
+          formattedRepoContext,
+          formattedProblemContext,
+          `${focusMap.get("researcher") ?? "General"} — ${rerunContext}`,
+          rerunSpan
+        );
+      }
+
+      if (rerunSet.has("analyst")) {
+        analyticsSpec = await runAnalyst(
+          formattedRepoContext,
+          formattedProblemContext,
+          userResearch,
+          `${focusMap.get("analyst") ?? "General"} — ${rerunContext}`,
+          rerunSpan
+        );
+      }
+
+      if (rerunSet.has("pm")) {
+        pmOutput = await runPm(
+          formattedRepoContext,
+          formattedProblemContext,
+          userResearch,
+          analyticsSpec,
+          `${focusMap.get("pm") ?? "General"} — ${rerunContext}`,
+          rerunSpan
+        );
+      }
+
+      if (rerunSet.has("head_of_product")) {
+        headOfProduct = await runHeadOfProduct(
+          formattedRepoContext,
+          formattedProblemContext,
+          userResearch,
+          analyticsSpec,
+          pmOutput,
+          `${focusMap.get("head_of_product") ?? "General"} — ${rerunContext}`,
+          rerunSpan
+        );
+      }
+      rerunSpan?.end({ output: `reran: ${review.rerun_agents.join(",")}` });
+    }
+  }
+
+  // ── Step 5: Designer + final assembly ───────────────────────────────
   const normalizedIssues = normalizeIssues(headOfProduct.issues);
   const userJourneySummary = buildJourneySummary(userResearch);
   const wireframeSvg = generateWireframeSvg({
@@ -386,7 +732,18 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     topIssue: normalizedIssues[0]
   });
 
-  return {
+  const packet: ProductPacket = {
+    execution_plan: {
+      problem_type: plan.problem_type,
+      reasoning: plan.reasoning,
+      agent_sequence: plan.agent_sequence.map((t) => ({
+        agent: t.agent,
+        focus: t.focus,
+        priority: t.priority
+      })),
+      review_pass: plan.review_pass,
+      review_focus: plan.review_focus
+    },
     prd_markdown: pmOutput.prd_markdown,
     user_research: userResearch,
     analytics_spec: analyticsSpec,
@@ -394,4 +751,21 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     wireframe_svg: wireframeSvg,
     issues: normalizedIssues
   };
+
+  trace?.update({
+    output: {
+      problem_type: plan.problem_type,
+      issue_count: normalizedIssues.length,
+      review_pass: plan.review_pass
+    }
+  });
+
+  return packet;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    trace?.update({ output: { error: message }, metadata: { status: "error" } });
+    throw err;
+  } finally {
+    await langfuse?.shutdownAsync();
+  }
 }

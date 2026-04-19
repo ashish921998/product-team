@@ -5,6 +5,20 @@ export type EventSpec = {
   properties: string[];
 };
 
+export type AgentTask = {
+  agent: string;
+  focus: string;
+  priority: "critical" | "standard" | "optional";
+};
+
+export type ExecutionPlan = {
+  problem_type: string;
+  reasoning: string;
+  agent_sequence: AgentTask[];
+  review_pass: boolean;
+  review_focus: string;
+};
+
 export type UserResearchSummary = {
   persona: string;
   pain_point: string;
@@ -31,6 +45,7 @@ export type IssueDraft = {
 };
 
 export type ProductPacket = {
+  execution_plan: ExecutionPlan;
   prd_markdown: string;
   user_research: UserResearchSummary;
   analytics_spec: AnalyticsSpec;

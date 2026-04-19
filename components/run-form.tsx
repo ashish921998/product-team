@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
-import type { IssueDraft, IssuePriority, ProductTeamRunResult } from "@/lib/types";
+import type { ExecutionPlan, IssueDraft, IssuePriority, ProductTeamRunResult } from "@/lib/types";
 
 const EXAMPLE_PROBLEMS = [
   "New users sign up, poke around once, and never come back.",
@@ -11,7 +11,7 @@ const EXAMPLE_PROBLEMS = [
   "Users say the product is useful, but the core feature still feels invisible."
 ];
 
-type AgentKey = "researcher" | "analyst" | "pm" | "head" | "designer";
+type AgentKey = "manager" | "researcher" | "analyst" | "pm" | "head" | "designer";
 type AgentState = "idle" | "active" | "done";
 
 const AGENTS: {
@@ -19,6 +19,11 @@ const AGENTS: {
   label: string;
   summary: string;
 }[] = [
+  {
+    key: "manager",
+    label: "Manager",
+    summary: "Analyzes the problem, plans which agents to run and what to focus on."
+  },
   {
     key: "researcher",
     label: "User Researcher",
@@ -68,7 +73,7 @@ export function RunForm() {
   }, []);
 
   function cycleStages() {
-    const sequence: AgentKey[] = ["researcher", "analyst", "pm", "head", "designer"];
+    const sequence: AgentKey[] = ["manager", "researcher", "analyst", "pm", "head", "designer"];
     let index = 0;
     setActiveAgent(sequence[0]);
 
@@ -76,11 +81,11 @@ export function RunForm() {
       index += 1;
       if (index < sequence.length) {
         setActiveAgent(sequence[index]);
-        stageTimerRef.current = setTimeout(step, 3200);
+        stageTimerRef.current = setTimeout(step, 2800);
       }
     };
 
-    stageTimerRef.current = setTimeout(step, 3200);
+    stageTimerRef.current = setTimeout(step, 2800);
   }
 
   function agentState(key: AgentKey): AgentState {
@@ -88,7 +93,7 @@ export function RunForm() {
     if (!isSubmitting) return "idle";
     if (activeAgent === key) return "active";
 
-    const order: AgentKey[] = ["researcher", "analyst", "pm", "head", "designer"];
+    const order: AgentKey[] = ["manager", "researcher", "analyst", "pm", "head", "designer"];
     const activeIndex = activeAgent ? order.indexOf(activeAgent) : -1;
     const myIndex = order.indexOf(key);
     return activeIndex > myIndex ? "done" : "idle";
@@ -348,7 +353,7 @@ function WaitlistSignupSection() {
 
 function AgentRail({ agentState }: { agentState: (key: AgentKey) => AgentState }) {
   return (
-    <section className="mt-10 grid gap-3 lg:grid-cols-5">
+    <section className="mt-10 grid gap-3 lg:grid-cols-6">
       {AGENTS.map((agent, index) => {
         const state = agentState(agent.key);
         return (
@@ -472,6 +477,13 @@ function Packet({ result }: { result: ProductTeamRunResult }) {
     navLabel: string;
     content: ReactNode;
   }[] = [
+    {
+      key: "plan",
+      title: "Manager execution plan",
+      eyebrow: "00",
+      navLabel: "Plan",
+      content: <ExecutionPlanCard plan={result.execution_plan} />
+    },
     {
       key: "prd",
       title: "Mini PRD markdown",
@@ -677,6 +689,46 @@ function JourneyStat({ label, value }: { label: string; value: string }) {
     <div className="min-w-0 rounded-2xl border border-[#1a181510] bg-[#faf7f0] p-4">
       <p className="mono text-[10px] uppercase tracking-[0.22em] text-[#7a7264]">{label}</p>
       <p className="mt-2 break-words text-[13px] leading-5 text-[#2f2a24]">{value}</p>
+    </div>
+  );
+}
+
+function ExecutionPlanCard({ plan }: { plan: ExecutionPlan }) {
+  const priorityColor: Record<string, string> = {
+    critical: "bg-[#c65a2e]/10 text-[#c65a2e] border-[#c65a2e]/20",
+    standard: "bg-[#a06a1a]/10 text-[#a06a1a] border-[#a06a1a]/20",
+    optional: "bg-[#5f724a]/10 text-[#5f724a] border-[#5f724a]/20"
+  };
+
+  return (
+    <div className="space-y-4 text-[14px] leading-6 text-[#3a342d]">
+      <div className="grid gap-3 md:grid-cols-2">
+        <JourneyStat label="Problem type" value={plan.problem_type} />
+        <JourneyStat label="Review pass" value={plan.review_pass ? `Yes — ${plan.review_focus}` : "No — straightforward problem"} />
+      </div>
+      <div className="rounded-2xl border border-[#1a181510] bg-[#faf7f0] p-4">
+        <p className="mono text-[10px] uppercase tracking-[0.22em] text-[#7a7264]">Manager reasoning</p>
+        <p className="mt-2 text-[13px] leading-5 text-[#2f2a24]">{plan.reasoning}</p>
+      </div>
+      <div>
+        <p className="mono text-[10px] uppercase tracking-[0.24em] text-[#7a7264]">Agent sequence</p>
+        <div className="mt-3 space-y-2">
+          {plan.agent_sequence.map((task, index) => (
+            <div key={`${task.agent}-${index}`} className="flex items-start gap-3 rounded-2xl border border-[#1a181510] bg-white p-4">
+              <span className="mono mt-0.5 shrink-0 text-[11px] text-[#7a7264]">0{index + 1}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-[14px] font-semibold text-[#1a1815] capitalize">{task.agent.replace("_", " ")}</span>
+                  <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${priorityColor[task.priority] ?? priorityColor.standard}`}>
+                    {task.priority}
+                  </span>
+                </div>
+                <p className="mt-1 break-words text-[12px] leading-5 text-[#6a6256]">{task.focus}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
