@@ -62,25 +62,27 @@ async function runAgent(model: string, system: string, prompt: string) {
   return getTextContent(response);
 }
 
-export async function generateIssueDrafts(problem: string): Promise<RankedIssueDrafts> {
-  const normalizedProblem = problem.trim();
+export async function generateIssueDrafts(productContext: string): Promise<RankedIssueDrafts> {
+  const normalizedProductContext = productContext.trim();
 
-  if (!normalizedProblem) {
-    throw new Error("Problem is required");
+  if (!normalizedProductContext) {
+    throw new Error("Product brief and problem are required");
   }
 
   const researcherNotes = await runAgent(
     RESEARCHER_MODEL,
-    "You are Researcher. Work only on the input problem. Do not propose solutions yet.",
+    "You are Researcher. Work only on the product brief and problem provided. Do not propose solutions yet.",
     [
-      "Analyze the vague product problem below.",
+      "Analyze the product brief and product problem below.",
       "Return three sections exactly:",
       "1. Core user pain",
       "2. Likely root causes",
       "3. Risks if we solve the wrong thing",
       "Keep it concise and practical.",
       "",
-      `Problem: ${normalizedProblem}`
+      "Use the product brief as context for your reasoning.",
+      "",
+      normalizedProductContext
     ].join("\n")
   );
 
@@ -88,7 +90,7 @@ export async function generateIssueDrafts(problem: string): Promise<RankedIssueD
     PM_MODEL,
     "You are PM. Turn the research into a tiny backlog. Stay ruthlessly scoped.",
     [
-      "Using the product problem and researcher notes below, propose exactly three issue candidates.",
+      "Using the product brief, product problem, and researcher notes below, propose exactly three issue candidates.",
       "Each candidate should include:",
       "- title",
       "- why",
@@ -96,7 +98,7 @@ export async function generateIssueDrafts(problem: string): Promise<RankedIssueD
       "- expected priority",
       "Do not write JSON. Plain text is fine.",
       "",
-      `Problem: ${normalizedProblem}`,
+      normalizedProductContext,
       "",
       "Researcher notes:",
       researcherNotes
@@ -114,7 +116,7 @@ export async function generateIssueDrafts(problem: string): Promise<RankedIssueD
       "Do not include markdown fences. Do not return more than three issues."
     ].join(" "),
     [
-      `Problem: ${normalizedProblem}`,
+      normalizedProductContext,
       "",
       "Researcher notes:",
       researcherNotes,
