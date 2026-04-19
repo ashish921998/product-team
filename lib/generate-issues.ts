@@ -1,26 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { Langfuse } from "langfuse-node";
+import { startActiveObservation } from "@langfuse/tracing";
 import { z } from "zod";
 
 import { getGithubRepoContext } from "@/lib/github-issues";
 import type { ProductPacket, UserResearchSummary } from "@/lib/types";
 
-// ---------------------------------------------------------------------------
-// Langfuse observability
-// ---------------------------------------------------------------------------
-
-function getLangfuse() {
-  const publicKey = process.env.LANGFUSE_PUBLIC_KEY;
-  const secretKey = process.env.LANGFUSE_SECRET_KEY;
-
-  if (!publicKey || !secretKey) return null;
-
-  return new Langfuse({
-    publicKey,
-    secretKey,
-    baseUrl: process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com"
-  });
-}
+// Langfuse observability: OpenTelemetry spans are emitted by
+// @arizeai/openinference-instrumentation-anthropic (auto-captures every
+// messages.create call with model, tokens, and I/O) plus @langfuse/tracing
+// wrappers below to give the pipeline a named parent span and agent nesting.
+// OTEL is initialized once in /instrumentation.ts at server start.
 
 const eventSpecSchema = z.object({
   name: z.string().min(1),
@@ -144,27 +133,8 @@ function extractJsonObject(raw: string) {
   return raw.slice(start, end + 1);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type LangfuseParent = { generation: (...args: any[]) => any; span: (...args: any[]) => any } | null;
-
-async function runAgent(
-  model: string,
-  system: string,
-  prompt: string,
-  maxTokens = 1400,
-  tracingParent: LangfuseParent = null,
-  generationName?: string
-) {
-  const client = getClient();
-
-  const gen = tracingParent?.generation({
-    name: generationName ?? `llm-${model}`,
-    model,
-    input: { system, prompt: prompt.slice(0, 500) },
-    modelParameters: { maxTokens, temperature: 0.2 }
-  });
-
-  const response = await client.messages.create({
+async function runAgent(model: string, system: string, prompt: string, maxTokens = 1400) {
+  const response = await getClient().messages.create({
     model,
     max_tokens: maxTokens,
     temperature: 0.2,
@@ -172,20 +142,10 @@ async function runAgent(
     messages: [{ role: "user", content: prompt }]
   });
 
-  const output = getTextContent(response);
-
-  gen?.end({
-    output: output.slice(0, 500),
-    usage: {
-      input: response.usage?.input_tokens,
-      output: response.usage?.output_tokens
-    }
-  });
-
-  return output;
+  return getTextContent(response);
 }
 
-async function repairJsonOutput(raw: string, schemaHint: string, tracingParent: LangfuseParent = null) {
+async function repairJsonOutput(raw: string, schemaHint: string) {
   return runAgent(
     PM_MODEL,
     [
@@ -194,10 +154,7 @@ async function repairJsonOutput(raw: string, schemaHint: string, tracingParent: 
       "Preserve the meaning of the input.",
       `Use this exact schema: ${schemaHint}`
     ].join(" "),
-    raw,
-    1400,
-    tracingParent,
-    "json-repair"
+    raw
   );
 }
 
@@ -207,23 +164,25 @@ async function runStructuredAgent<T>(params: {
   prompt: string;
   schema: z.ZodType<T>;
   schemaHint: string;
-  tracingParent?: LangfuseParent;
   agentName?: string;
 }) {
-  const span = params.tracingParent?.span({ name: params.agentName ?? "structured-agent" });
-  const raw = await runAgent(params.model, params.system, params.prompt, 1400, span ?? params.tracingParent, params.agentName);
+  return startActiveObservation(params.agentName ?? "structured-agent", async (span) => {
+    span.update({ input: { system: params.system, prompt: params.prompt.slice(0, 500) } });
 
-  try {
-    const parsed = params.schema.parse(JSON.parse(extractJsonObject(raw)));
-    span?.end({ output: JSON.stringify(parsed).slice(0, 500) });
-    return parsed;
-  } catch {
-    span?.event({ name: "json-parse-failed", input: { raw: raw.slice(0, 300) } });
-    const repaired = await repairJsonOutput(raw, params.schemaHint, span ?? params.tracingParent);
-    const parsed = params.schema.parse(JSON.parse(extractJsonObject(repaired)));
-    span?.end({ output: JSON.stringify(parsed).slice(0, 500) });
-    return parsed;
-  }
+    const raw = await runAgent(params.model, params.system, params.prompt);
+
+    try {
+      const parsed = params.schema.parse(JSON.parse(extractJsonObject(raw)));
+      span.update({ output: parsed });
+      return parsed;
+    } catch {
+      span.update({ metadata: { json_parse_failed: true, raw: raw.slice(0, 300) } });
+      const repaired = await repairJsonOutput(raw, params.schemaHint);
+      const parsed = params.schema.parse(JSON.parse(extractJsonObject(repaired)));
+      span.update({ output: parsed });
+      return parsed;
+    }
+  });
 }
 
 function escapeXml(value: string) {
@@ -318,7 +277,6 @@ async function runResearcher(
   formattedRepoContext: string,
   formattedProblemContext: string,
   focus: string,
-  tracingParent: LangfuseParent = null
 ) {
   return runStructuredAgent({
     model: RESEARCHER_MODEL,
@@ -345,7 +303,6 @@ async function runResearcher(
     schema: userResearchSchema,
     schemaHint:
       '{"persona":"string","pain_point":"string","drop_off_point":"string","hypotheses":["string","string","string"]}',
-    tracingParent,
     agentName: "researcher"
   });
 }
@@ -355,7 +312,6 @@ async function runAnalyst(
   formattedProblemContext: string,
   userResearch: z.infer<typeof userResearchSchema>,
   focus: string,
-  tracingParent: LangfuseParent = null
 ) {
   return runStructuredAgent({
     model: ANALYST_MODEL,
@@ -386,7 +342,6 @@ async function runAnalyst(
     schema: analyticsSpecSchema,
     schemaHint:
       '{"success_metric":"string","guardrail_metric":"string optional","event_specs":[{"name":"string","properties":["string","string"]},{"name":"string","properties":["string","string"]},{"name":"string","properties":["string","string"]}]}',
-    tracingParent,
     agentName: "analyst"
   });
 }
@@ -397,7 +352,6 @@ async function runPm(
   userResearch: z.infer<typeof userResearchSchema>,
   analyticsSpec: z.infer<typeof analyticsSpecSchema>,
   focus: string,
-  tracingParent: LangfuseParent = null
 ) {
   return runStructuredAgent({
     model: PM_MODEL,
@@ -445,7 +399,6 @@ async function runPm(
     schema: pmOutputSchema,
     schemaHint:
       '{"prd_markdown":"string","issue_drafts":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P1"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P2"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority_hint":"P3"}]}',
-    tracingParent,
     agentName: "pm"
   });
 }
@@ -457,7 +410,6 @@ async function runHeadOfProduct(
   analyticsSpec: z.infer<typeof analyticsSpecSchema>,
   pmOutput: z.infer<typeof pmOutputSchema>,
   focus: string,
-  tracingParent: LangfuseParent = null
 ) {
   return runStructuredAgent({
     model: HEAD_OF_PRODUCT_MODEL,
@@ -510,7 +462,6 @@ async function runHeadOfProduct(
     schema: headOfProductSchema,
     schemaHint:
       '{"issues":[{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P1","ice_score":8.1,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P2","ice_score":7.4,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"},{"title":"string","why":"string","acceptance_criteria":["string"],"priority":"P3","ice_score":6.8,"success_metric":"string","event_to_instrument":{"name":"string","properties":["string","string"]},"drop_off_point":"string","guardrail_metric":"string optional"}]}',
-    tracingParent,
     agentName: "head-of-product"
   });
 }
@@ -526,21 +477,17 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     throw new Error("Problem is required");
   }
 
-  // ── Langfuse trace for the full pipeline run ────────────────────────
-  const langfuse = getLangfuse();
-  const trace = langfuse?.trace({
-    name: "product-packet-pipeline",
-    input: { problem: normalizedProblem },
-    metadata: { version: "2.0-manager" }
-  }) ?? null;
+  return startActiveObservation("product-packet-pipeline", async (rootSpan) => {
+    rootSpan.update({
+      input: { problem: normalizedProblem },
+      metadata: { version: "2.0-manager" }
+    });
 
-  try {
   const repoContext = await getGithubRepoContext();
   const formattedRepoContext = formatRepoContext(repoContext);
   const formattedProblemContext = formatProblemContext(normalizedProblem);
 
   // ── Step 1: Manager Agent creates a dynamic execution plan ──────────
-  const managerSpan = trace?.span({ name: "manager-planning" }) ?? null;
   const plan = await runStructuredAgent<ExecutionPlan>({
     model: MANAGER_MODEL,
     system: [
@@ -576,10 +523,8 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     schema: executionPlanSchema,
     schemaHint:
       '{"problem_type":"retention","reasoning":"string","agent_sequence":[{"agent":"researcher","focus":"string","priority":"critical"},{"agent":"analyst","focus":"string","priority":"critical"},{"agent":"pm","focus":"string","priority":"critical"},{"agent":"head_of_product","focus":"string","priority":"standard"},{"agent":"designer","focus":"string","priority":"standard"}],"review_pass":true,"review_focus":"string"}',
-    tracingParent: managerSpan,
     agentName: "manager-plan"
   });
-  managerSpan?.end({ output: JSON.stringify(plan).slice(0, 500) });
 
   // Build a focus lookup from the plan
   const focusMap = new Map<AgentId, string>();
@@ -591,16 +536,14 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
   let userResearch = await runResearcher(
     formattedRepoContext,
     formattedProblemContext,
-    focusMap.get("researcher") ?? "General user research",
-    trace
+    focusMap.get("researcher") ?? "General user research"
   );
 
   let analyticsSpec = await runAnalyst(
     formattedRepoContext,
     formattedProblemContext,
     userResearch,
-    focusMap.get("analyst") ?? "General analytics",
-    trace
+    focusMap.get("analyst") ?? "General analytics"
   );
 
   let pmOutput = await runPm(
@@ -608,8 +551,7 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     formattedProblemContext,
     userResearch,
     analyticsSpec,
-    focusMap.get("pm") ?? "General PM output",
-    trace
+    focusMap.get("pm") ?? "General PM output"
   );
 
   let headOfProduct = await runHeadOfProduct(
@@ -618,13 +560,11 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     userResearch,
     analyticsSpec,
     pmOutput,
-    focusMap.get("head_of_product") ?? "General prioritization",
-    trace
+    focusMap.get("head_of_product") ?? "General prioritization"
   );
 
   // ── Step 3: Manager review pass (if plan requires it) ───────────────
   if (plan.review_pass) {
-    const reviewSpan = trace?.span({ name: "manager-review" }) ?? null;
     const review = await runStructuredAgent({
       model: MANAGER_MODEL,
       system: [
@@ -667,14 +607,11 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
       schema: reviewVerdictSchema,
       schemaHint:
         '{"approved":true,"issues_found":[],"rerun_agents":[],"summary":"string"}',
-      tracingParent: reviewSpan,
       agentName: "manager-review"
     });
-    reviewSpan?.end({ output: JSON.stringify(review).slice(0, 500) });
 
     // ── Step 4: Re-run flagged agents if needed (one retry max) ────────
     if (!review.approved && review.rerun_agents.length > 0) {
-      const rerunSpan = trace?.span({ name: "rerun" }) ?? null;
       const rerunSet = new Set(review.rerun_agents);
       const rerunContext = `MANAGER FEEDBACK: ${review.issues_found.join("; ")}. Fix these issues.`;
 
@@ -682,8 +619,7 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
         userResearch = await runResearcher(
           formattedRepoContext,
           formattedProblemContext,
-          `${focusMap.get("researcher") ?? "General"} — ${rerunContext}`,
-          rerunSpan
+          `${focusMap.get("researcher") ?? "General"} — ${rerunContext}`
         );
       }
 
@@ -692,8 +628,7 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
           formattedRepoContext,
           formattedProblemContext,
           userResearch,
-          `${focusMap.get("analyst") ?? "General"} — ${rerunContext}`,
-          rerunSpan
+          `${focusMap.get("analyst") ?? "General"} — ${rerunContext}`
         );
       }
 
@@ -703,8 +638,7 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
           formattedProblemContext,
           userResearch,
           analyticsSpec,
-          `${focusMap.get("pm") ?? "General"} — ${rerunContext}`,
-          rerunSpan
+          `${focusMap.get("pm") ?? "General"} — ${rerunContext}`
         );
       }
 
@@ -715,11 +649,9 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
           userResearch,
           analyticsSpec,
           pmOutput,
-          `${focusMap.get("head_of_product") ?? "General"} — ${rerunContext}`,
-          rerunSpan
+          `${focusMap.get("head_of_product") ?? "General"} — ${rerunContext}`
         );
       }
-      rerunSpan?.end({ output: `reran: ${review.rerun_agents.join(",")}` });
     }
   }
 
@@ -752,7 +684,7 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
     issues: normalizedIssues
   };
 
-  trace?.update({
+  rootSpan.update({
     output: {
       problem_type: plan.problem_type,
       issue_count: normalizedIssues.length,
@@ -761,11 +693,5 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
   });
 
   return packet;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    trace?.update({ output: { error: message }, metadata: { status: "error" } });
-    throw err;
-  } finally {
-    await langfuse?.shutdownAsync();
-  }
+  });
 }
