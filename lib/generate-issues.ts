@@ -54,7 +54,6 @@ const RESEARCHER_MODEL = "claude-haiku-4-5";
 const ANALYST_MODEL = "claude-haiku-4-5";
 const PM_MODEL = "claude-haiku-4-5";
 const HEAD_OF_PRODUCT_MODEL = "claude-sonnet-4-5";
-const DESIGNER_MODEL = "claude-sonnet-4-5";
 
 function getClient() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -83,17 +82,6 @@ function extractJsonObject(raw: string) {
   }
 
   return raw.slice(start, end + 1);
-}
-
-function extractSvg(raw: string) {
-  const start = raw.indexOf("<svg");
-  const end = raw.lastIndexOf("</svg>");
-
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error("Model did not return SVG");
-  }
-
-  return raw.slice(start, end + 6).replace(/<script[\s\S]*?<\/script>/gi, "").trim();
 }
 
 async function runAgent(model: string, system: string, prompt: string, maxTokens = 1400) {
@@ -140,6 +128,21 @@ async function runStructuredAgent<T>(params: {
   }
 }
 
+function escapeXml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function truncate(value: string, max = 60) {
+  const trimmed = value.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max - 1).trimEnd()}…`;
+}
+
 function formatRepoContext(context: Awaited<ReturnType<typeof getGithubRepoContext>>) {
   return [
     `Target repo: ${context.owner}/${context.repo}`,
@@ -173,42 +176,40 @@ function normalizeIssues(issues: z.infer<typeof finalIssueSchema>[]) {
   })) as ProductPacket["issues"];
 }
 
-async function generateWireframeSvg(params: {
+function generateWireframeSvg(params: {
   problem: string;
   research: z.infer<typeof userResearchSchema>;
   topIssue: z.infer<typeof finalIssueSchema>;
 }) {
-  const raw = await runAgent(
-    DESIGNER_MODEL,
-    [
-      "You are Designer.",
-      "Generate exactly one lightweight wireframe only.",
-      "Return raw SVG only.",
-      "Static SVG only. No markdown fences. No prose.",
-      "Do not generate multiple screens.",
-      "Do not generate polished UI. Keep it clearly wireframe-level."
-    ].join(" "),
-    [
-      "Create one static SVG wireframe for the top-priority issue only.",
-      "The wireframe should feel toy-sized and demoable.",
-      "Use a single desktop canvas around 900x560.",
-      "Use simple rectangles, labels, arrows, and 1 accent color max.",
-      "Include a title in the wireframe matching the issue title.",
-      "Ground the layout in the persona and drop-off point.",
-      "Do not include implementation notes outside the SVG.",
-      "",
-      formatProblemContext(params.problem),
-      "",
-      `Persona: ${params.research.persona}`,
-      `Pain point: ${params.research.pain_point}`,
-      `Drop-off point: ${params.research.drop_off_point}`,
-      `Top issue title: ${params.topIssue.title}`,
-      `Top issue why: ${params.topIssue.why}`
-    ].join("\n"),
-    1600
-  );
+  const issueTitle = escapeXml(truncate(params.topIssue.title, 64));
+  const persona = escapeXml(truncate(params.research.persona, 42));
+  const dropOff = escapeXml(truncate(params.research.drop_off_point, 44));
+  const problem = escapeXml(truncate(params.problem, 72));
 
-  return extractSvg(raw);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560" fill="none">
+  <rect width="900" height="560" rx="24" fill="#F8F4EC"/>
+  <rect x="56" y="56" width="788" height="448" rx="20" fill="#FFFDF8" stroke="#D9D1C5"/>
+  <text x="88" y="100" fill="#C65A2E" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">LIGHTWEIGHT WIREFRAME</text>
+  <text x="88" y="138" fill="#1A1815" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">${issueTitle}</text>
+  <text x="88" y="164" fill="#6B645A" font-family="Inter, Arial, sans-serif" font-size="14">${problem}</text>
+
+  <rect x="88" y="204" width="724" height="64" rx="16" fill="#FAF7F0" stroke="#E5DDD1"/>
+  <text x="112" y="230" fill="#7A7264" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">TARGET USER</text>
+  <text x="112" y="252" fill="#1A1815" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="600">${persona}</text>
+
+  <rect x="88" y="300" width="460" height="140" rx="18" fill="#FFFFFF" stroke="#D9D1C5"/>
+  <text x="112" y="330" fill="#7A7264" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">MAIN SCREEN</text>
+  <rect x="112" y="352" width="412" height="24" rx="8" fill="#F4EFE6"/>
+  <rect x="112" y="392" width="268" height="16" rx="8" fill="#F4EFE6"/>
+  <rect x="112" y="420" width="180" height="16" rx="8" fill="#F4EFE6"/>
+
+  <rect x="580" y="300" width="232" height="140" rx="18" fill="#FFF3EB" stroke="#F0C5AF"/>
+  <text x="604" y="330" fill="#C65A2E" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">DROP-OFF TO FIX</text>
+  <text x="604" y="362" fill="#1A1815" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="600">${dropOff}</text>
+  <text x="604" y="394" fill="#6B645A" font-family="Inter, Arial, sans-serif" font-size="13">Focus the top issue here.</text>
+
+  <text x="450" y="480" text-anchor="middle" fill="#7A7264" font-family="Inter, Arial, sans-serif" font-size="10" font-weight="700">single static svg, fixed template, no model-generated layout</text>
+</svg>`;
 }
 
 export async function generateIssueDrafts(problem: string): Promise<ProductPacket> {
@@ -379,7 +380,7 @@ export async function generateIssueDrafts(problem: string): Promise<ProductPacke
 
   const normalizedIssues = normalizeIssues(headOfProduct.issues);
   const userJourneySummary = buildJourneySummary(userResearch);
-  const wireframeSvg = await generateWireframeSvg({
+  const wireframeSvg = generateWireframeSvg({
     problem: normalizedProblem,
     research: userResearch,
     topIssue: normalizedIssues[0]
